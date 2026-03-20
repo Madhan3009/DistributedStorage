@@ -1,0 +1,42 @@
+aults in the app are:
+
+- host: `localhost`
+- port: `5432`
+- database: `demo_db`
+- username: `postgres`
+
+## Example Local Setup
+
+```bash
+export JAVA_HOME=/snap/intellij-idea-community/733/jbr
+export PATH=$JAVA_HOME/bin:$PATH
+
+export DB_HOST=localhost
+export DB_PORT=5432
+export DB_NAME=user_db
+export DB_USERNAME=postgres
+export DB_PASSWORD="Secret"
+```
+
+Then run:
+
+```bash
+./mvnw spring-boot:run
+```
+
+## API Usage
+
+Register a user:
+
+```bash
+curl -X POST http://localhost:8080/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user1","email":"user1@example.com","password":"secret123"}'
+```
+
+Login:
+
+```bash
+curl -X POST http://localhost:8080/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"user1","password":"secret123

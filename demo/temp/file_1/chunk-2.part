@@ -1,0 +1,33 @@
+"}'
+```
+
+Use the returned token:
+
+```bash
+curl http://localhost:8080/api/me \
+  -H "Authorization: Bearer YOUR_TOKEN_HERE"
+```
+
+## Testing
+
+Run tests with:
+
+```bash
+./mvnw test
+```
+
+Tests use an isolated H2 in-memory database under the `test` profile, so they do not depend on your PostgreSQL data.
+
+## Main Files
+
+- `src/main/java/com/dSystems/demo/Controller/AuthController.java`
+- `src/main/java/com/dSystems/demo/Config/AppConfig.java`
+- `src/main/java/com/dSystems/demo/Security/JWTAuthenticationFilter.java`
+- `src/main/java/com/dSystems/demo/Security/JWTHelper.java`
+- `src/main/resources/application.properties`
+
+## Next Recommended Steps
+
+- add role-based authorization
+- add refresh tokens if needed
+- add frontend integration after backend APIs are stable
