@@ -35,11 +35,12 @@ The backend flow is:
 
 ### `Config`
 
-Contains application security configuration.
+Contains configuration classes that shape how the application starts and where core settings come from.
 
 Main file:
 
 - `src/main/java/com/dSystems/demo/Config/AppConfig.java`
+- `src/main/java/com/dSystems/demo/Config/StorageProperties.java`
 
 What it does:
 
@@ -51,6 +52,44 @@ What it does:
 - registers the authentication provider
 - exposes the password encoder and authentication manager
 
+#### Why `AppConfig` exists
+
+Spring Security needs explicit configuration to know:
+
+- which URLs are public
+- which URLs require JWT authentication
+- how passwords should be encoded
+- how user authentication should be performed
+
+Without this class, Spring Security would either use defaults or not behave the way this project needs.
+
+#### Important methods in `AppConfig`
+
+- `securityFilterChain(...)`
+  Purpose:
+  defines the HTTP security rules for the whole application
+- `authenticationProvider()`
+  Purpose:
+  tells Spring how to validate username/password against stored users
+- `passwordEncoder()`
+  Purpose:
+  ensures passwords are stored and matched using BCrypt
+- `authenticationManager(...)`
+  Purpose:
+  gives the controller access to Spring’s authentication engine during login
+
+#### Why `StorageProperties` exists
+
+The chunk upload flow needs filesystem paths and chunk limits from configuration, not hardcoded strings in controllers.
+
+This class binds values such as:
+
+- `app.tempDir`
+- `app.uploadDir`
+- `app.maxChunksPerFile`
+
+That makes the storage layer configurable and easier to change later when moving to Docker or another environment.
+
 ## `Controller`
 
 Contains the REST endpoints.
@@ -58,6 +97,7 @@ Contains the REST endpoints.
 Main files:
 
 - `src/main/java/com/dSystems/demo/Controller/AuthController.java`
+- `src/main/java/com/dSystems/demo/Controller/FileChunkController.java`
 - `src/main/java/com/dSystems/demo/Controller/TestController.java`
 
 ### `AuthController`
@@ -92,6 +132,27 @@ What happens:
 - generates a JWT token using `JWTHelper`
 - returns token and username
 
+#### Why `AuthController` exists
+
+This class is the entry point for authentication requests from the client.
+
+It should stay thin:
+
+- accept HTTP requests
+- pass work to Spring Security and other services
+- return HTTP responses
+
+It should not contain database or token logic directly.
+
+#### Important methods in `AuthController`
+
+- `register(...)`
+  Purpose:
+  create a user and store an encoded password
+- `login(...)`
+  Purpose:
+  authenticate credentials and return a JWT token
+
 ### `TestController`
 
 This is a sample protected endpoint.
@@ -107,13 +168,66 @@ What happens:
 - request must contain a valid JWT token
 - if authentication succeeds, it returns the logged-in username
 
+#### Why `TestController` exists
+
+This controller is not business logic. It exists only as a simple protected endpoint to verify that JWT authentication works correctly end to end.
+
+### `FileChunkController`
+
+This controller handles chunked file upload and rebuild endpoints.
+
+#### `/files/chunks`
+
+Purpose:
+
+- receive one chunk of a file upload
+
+What happens:
+
+- receives the multipart chunk
+- receives chunk number, total chunks, and identifier
+- passes everything to `FileChunkService`
+- returns the result as an HTTP response
+
+#### `/files/rebuild`
+
+Purpose:
+
+- rebuild the final file from previously uploaded chunks
+
+What happens:
+
+- receives the file identifier
+- delegates rebuild logic to `FileChunkService`
+- returns success or failure message
+
+#### Why `FileChunkController` exists
+
+This class only handles web routing for chunk upload functionality.
+
+The actual logic was intentionally moved out of the controller so:
+
+- the controller stays simple
+- the upload logic is reusable
+- business logic is easier to test and maintain
+
+#### Important methods in `FileChunkController`
+
+- `uploadChunk(...)`
+  Purpose:
+  map HTTP chunk upload requests to the chunk service
+- `rebuildFile(...)`
+  Purpose:
+  map rebuild requests to the rebuild service flow
+
 ## `Model`
 
-Contains the database entity.
+Contains classes that represent structured application data.
 
 Main file:
 
 - `src/main/java/com/dSystems/demo/Model/AppUser.java`
+- `src/main/java/com/dSystems/demo/Model/FileChunkMetadata.java`
 
 This entity represents a user in the database.
 
@@ -129,6 +243,28 @@ Fields:
 ### Why this model exists
 
 Spring Security needs real user data from a persistent source. This entity stores that data so future users can log in, not just hardcoded names.
+
+### `FileChunkMetadata`
+
+This model represents the meaning of the metadata file used in chunk uploads.
+
+Fields:
+
+- `fileId`
+- `originalFileName`
+- `totalChunks`
+- `tempDirectory`
+- `chunkPaths`
+
+#### Why `FileChunkMetadata` exists
+
+The metadata file on disk needs a structured in-memory representation so code can:
+
+- read metadata cleanly
+- inspect chunk locations
+- rebuild the original file in the correct order
+
+Without this model, metadata handling would stay as loose key/value strings everywhere.
 
 ## `Repository`
 
@@ -201,6 +337,18 @@ What it does:
 - checks whether token is expired
 - validates token against the authenticated user
 
+Important methods:
+
+- `generateToken(...)`
+  Purpose:
+  create a signed JWT for a successfully authenticated user
+- `getUsernameFromToken(...)`
+  Purpose:
+  read the username stored inside the JWT
+- `validateToken(...)`
+  Purpose:
+  confirm that the token matches the user and is not expired
+
 ### `JWTAuthenticationFilter`
 
 Purpose:
@@ -217,6 +365,12 @@ What it does:
 - sets authentication into Spring Security context
 
 This is the core piece that makes protected endpoints work.
+
+Important method:
+
+- `doFilterInternal(...)`
+  Purpose:
+  inspect each request, extract JWT if present, validate it, and set authentication in the security context
 
 ### `JWTAthenticationEntryPoint`
 
@@ -240,6 +394,84 @@ Purpose:
 
 If required fields are missing or invalid, this class formats the response instead of returning a generic error.
 
+## `Service`
+
+Contains business logic that should not live inside controllers.
+
+Main files:
+
+- `src/main/java/com/dSystems/demo/Service/FileChunkService.java`
+- `src/main/java/com/dSystems/demo/Service/FileChunkMetadataService.java`
+
+### `FileChunkService`
+
+Purpose:
+
+- handle chunk upload workflow
+- validate upload rules
+- save chunk files
+- delegate metadata persistence
+- trigger rebuild requests
+
+#### Why `FileChunkService` exists
+
+Chunk handling is business logic, not controller logic.
+
+This service exists so the controller does not have to know:
+
+- how chunks are validated
+- where chunks are stored
+- how many chunks are allowed
+- how metadata is updated
+- how rebuild requests are processed
+
+#### Important methods in `FileChunkService`
+
+- `uploadChunk(...)`
+  Purpose:
+  validate and store a chunk, update metadata, and report upload progress
+- `rebuildFile(...)`
+  Purpose:
+  locate the metadata for an identifier and rebuild the final file using metadata service
+
+### `FileChunkMetadataService`
+
+Purpose:
+
+- own metadata file handling completely
+- make metadata useful for rebuild operations
+
+#### Why `FileChunkMetadataService` exists
+
+Metadata logic was separated because it is its own concern.
+
+This service is responsible for:
+
+- deciding where metadata lives
+- updating metadata after each stored chunk
+- reading metadata back into a structured object
+- rebuilding a file from metadata
+
+That separation makes the code cleaner because:
+
+- chunk upload service handles upload workflow
+- metadata service handles manifest/rebuild workflow
+
+#### Important methods in `FileChunkMetadataService`
+
+- `metadataPath(...)`
+  Purpose:
+  return the standard path of the metadata file for a chunk directory
+- `updateMetadata(...)`
+  Purpose:
+  write or update the metadata file whenever a chunk is stored
+- `readMetadata(...)`
+  Purpose:
+  load the metadata file into `FileChunkMetadata`
+- `rebuildFile(...)`
+  Purpose:
+  reassemble the final file by reading chunk paths in order from metadata
+
 ## Configuration Files
 
 ### `src/main/resources/application.properties`
@@ -250,6 +482,9 @@ This file contains runtime configuration for:
 - JPA/Hibernate settings
 - JWT secret
 - JWT expiration
+- temp directory for chunk storage
+- upload directory for rebuilt files
+- max chunks allowed per file
 
 The database values are driven by environment variables:
 
@@ -302,6 +537,47 @@ It uses H2 in-memory database so tests:
 7. authentication is placed in security context
 8. controller method runs as authenticated user
 
+### Chunk Upload Flow
+
+1. Client sends one chunk to `/files/chunks`
+2. `FileChunkController` receives request parameters
+3. controller delegates to `FileChunkService`
+4. `FileChunkService` validates:
+   - file presence
+   - filename safety
+   - identifier format
+   - chunk numbering
+   - exact 3-chunk rule
+5. chunk file is stored under `temp/<identifier>/chunk-N.part`
+6. `FileChunkMetadataService` updates `metadata.properties`
+7. service counts stored chunks
+8. response says either:
+   - chunk accepted
+   - or all chunks received
+
+### Metadata Update Flow
+
+1. a chunk is saved
+2. metadata service opens or creates `metadata.properties`
+3. it stores:
+   - file id
+   - original file name
+   - total chunk count
+   - temp directory
+   - each chunk path
+4. metadata file becomes the source of truth for reconstruction
+
+### Rebuild Flow
+
+1. Client calls `/files/rebuild?identifier=<id>`
+2. controller delegates to `FileChunkService`
+3. service locates `temp/<identifier>/metadata.properties`
+4. metadata service reads the metadata
+5. metadata service verifies chunk entries exist
+6. chunk files are read in order `0 -> totalChunks - 1`
+7. final file is written to the configured upload directory
+8. response returns rebuilt file path
+
 ## Why Tests Use H2 But Runtime Uses PostgreSQL
 
 Runtime uses PostgreSQL because that is the real application database.
@@ -326,6 +602,9 @@ The following are already working:
 - PostgreSQL configuration for runtime
 - isolated H2 configuration for tests
 - Maven test suite passing
+- chunk upload controller to service delegation
+- metadata file generation for chunks
+- rebuild logic based on metadata
 
 ## Current Limitations
 
@@ -336,6 +615,8 @@ These are not implemented yet:
 - email verification
 - role-based endpoint restrictions beyond basic stored role field
 - frontend integration
+- automatic client-side file splitting
+- hex conversion for stored chunk content
 
 ## Recommended Next Steps
 
@@ -357,3 +638,5 @@ It now works like a normal authentication system:
 - JWT tokens are issued on login
 - tokens are validated for protected routes
 - PostgreSQL stores the real user data
+- chunk uploads are stored under a controlled temp directory
+- metadata is stored separately and can drive rebuild logic
