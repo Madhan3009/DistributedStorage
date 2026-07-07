@@ -16,8 +16,20 @@ app:
   jwt:
     secret: afafasfafafasfasfasfafacasdasfasxASFACASDFACASDFASFASFDAFASFASDAADSCSDFADCVSGCFVADXCcadwavfsfarvf
     expiration-seconds: 18000
-  tempDir: temp/
-  uploadDir: uploads/
-  maxChunksPerFile: 3
+  tempDir: ${APP_TEMP_DIR:temp/}
+  uploadDir: ${APP_UPLOAD_DIR:uploads/}
+  maxChunksPerFile: ${APP_MAX_CHUNKS:10}
+  replicationFactor: ${APP_REPLICATION_FACTOR:3}
+  role: ${APP_ROLE:COORDINATOR}
+  coordinatorUrl: ${APP_COORDINATOR_URL:http://localhost:9000}
+  nodeId: ${APP_NODE_ID:coordinator}
+  host: ${APP_HOST:localhost}
+  port: ${APP_PORT:9000}
 server:
-  port: 9000
+  port: ${PORT:9000}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
