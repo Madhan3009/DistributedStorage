@@ -442,8 +442,8 @@
                     <i class="fa-solid fa-file-import"></i>
                     <h3 style="margin-bottom: 0.5rem; font-weight: 500;">Click or Drag & Drop</h3>
                     <p style="font-size: 0.85rem; color: var(--text-muted);">Files will be chunked (50KB) and distributed</p>
-                    <input type="file" id="file-input" style="display: none;" onchange="handleFileSelect(event)">
                 </div>
+                <input type="file" id="file-input" style="display: none;" onchange="handleFileSelect(event)">
 
                 <div id="upload-progress-container">
                     <div style="display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 0.5rem;">
@@ -737,7 +737,10 @@
                         body: formData
                     });
 
-                    if (!res.ok) throw new Error(`Chunk ${i} failed`);
+                    if (!res.ok) {
+                        const errMsg = await res.text();
+                        throw new Error(errMsg || `Chunk ${i} failed`);
+                    }
 
                     const percent = Math.round(((i + 1) / totalChunks) * 100);
                     fill.style.width = percent + '%';

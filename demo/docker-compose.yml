@@ -22,6 +22,7 @@ services:
       APP_NODE_ID: coordinator
       APP_HOST: coordinator
       APP_PORT: 9000
+      APP_REPLICATION_FACTOR: 2
     depends_on:
       - postgres
 
@@ -39,6 +40,7 @@ services:
       APP_PORT: 9001
       APP_COORDINATOR_URL: http://coordinator:9000
       APP_TEMP_DIR: temp/node-1/
+      APP_REPLICATION_FACTOR: 2
     depends_on:
       - coordinator
 
@@ -56,6 +58,7 @@ services:
       APP_PORT: 9002
       APP_COORDINATOR_URL: http://coordinator:9000
       APP_TEMP_DIR: temp/node-2/
+      APP_REPLICATION_FACTOR: 2
     depends_on:
       - coordinator
 
@@ -73,5 +76,6 @@ services:
       APP_PORT: 9003
       APP_COORDINATOR_URL: http://coordinator:9000
       APP_TEMP_DIR: temp/node-3/
+      APP_REPLICATION_FACTOR: 2
     depends_on:
       - coordinator

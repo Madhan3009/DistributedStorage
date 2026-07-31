@@ -3,7 +3,7 @@
 # 🗄️ Distributed Storage System
 
 **A fault-tolerant, distributed file storage engine built with Spring Boot.**  
-Files are automatically split into chunks, replicated across nodes, and reassembled on demand — even when nodes fail.
+Files are automatically split into chunks, replicated across nodes, and self-healed when nodes fail.
 
 [![Java](https://img.shields.io/badge/Java-21-ED8B00?style=for-the-badge&logo=openjdk&logoColor=white)](https://openjdk.org/projects/jdk/21/)
 [![Spring Boot](https://img.shields.io/badge/Spring_Boot-4.0-6DB33F?style=for-the-badge&logo=springboot&logoColor=white)](https://spring.io/projects/spring-boot)
@@ -15,125 +15,263 @@ Files are automatically split into chunks, replicated across nodes, and reassemb
 
 ---
 
-## ✨ Overview
+## ⚡ Interview Quick-Start (TL;DR)
 
-This project simulates a **production-grade distributed file storage system** with the following capabilities:
+> Clone → start PostgreSQL → run coordinator → demo in under 5 minutes.
 
-- **Chunked uploads** — files are sliced into configurable chunks and distributed independently
-- **Consistent hashing** — chunks are deterministically placed across nodes using a virtual-node ring
-- **Replication** — each chunk is replicated to `N` nodes (configurable, default: 3)
-- **Self-healing** — a background scheduler detects under-replicated chunks and automatically re-replicates them when a node goes down
-- **Fault-tolerant retrieval** — downloads fall back to alive replicas if the primary node is unreachable
-- **JWT authentication** — all user-facing endpoints are protected with stateless JWT tokens
-- **Admin dashboard** — a browser-based console for uploading files, monitoring node health, and simulating node failures
+```bash
+# 1. Clone
+git clone https://github.com/Madhan3009/DistributedStorage.git
+cd DistributedStorage/demo
+
+# 2. Start PostgreSQL (Docker, fastest way — no install needed)
+docker run -d --name pg \
+  -e POSTGRES_DB=user_db \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=admin \
+  -p 5432:5432 postgres:16
+
+# 3. Run the coordinator (default port 9000)
+./mvnw spring-boot:run
+
+# 4. Open the dashboard
+# → http://localhost:9000/dashboard
+```
+
+**Done.** Register a user, upload a file, and watch the node health panel.  
+No extra config needed — defaults in `application.yml` match the docker run above.
+
+---
+
+## ✨ What This System Does
+
+| Feature | How |
+|---|---|
+| **Chunked uploads** | Files split into configurable chunks, uploaded independently |
+| **Consistent hashing** | `TreeMap`-based virtual-node ring (50 vnodes/node) deterministically places chunks |
+| **Replication** | Each chunk copied to N nodes (default: 3). Tolerates `N-1` simultaneous node failures |
+| **Three-state health** | `ALIVE → SUSPECTED → DEAD` prevents false positives from GC pauses / network blips |
+| **Self-healing** | Background scheduler detects under-replicated chunks and re-replicates them automatically |
+| **Fault-tolerant download** | Falls back to alive replicas transparently — callers never see node failures |
+| **JWT auth** | Stateless HS512 JWT, 5-hour expiry, Spring Security filter chain |
+| **Dashboard** | Browser UI for file uploads, node health monitoring, and failure simulation |
 
 ---
 
 ## 🏗️ Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│                    Coordinator Node                  │
-│                                                     │
-│  ┌─────────────┐  ┌─────────────┐  ┌────────────┐  │
-│  │ FileChunk   │  │  Node       │  │ Consistent │  │
-│  │ Service     │  │  Registry   │  │ Hash Ring  │  │
-│  │ (upload/    │  │  Service    │  │ (chunk     │  │
-│  │  download)  │  │  (health)   │  │  routing)  │  │
-│  └──────┬──────┘  └──────┬──────┘  └─────┬──────┘  │
-│         └───────────────┬┴────────────────┘         │
-│                    PostgreSQL DB                     │
-└─────────────────────────┬───────────────────────────┘
-                          │ HTTP (internal)
-        ┌─────────────────┼──────────────────┐
-        ▼                 ▼                  ▼
-  ┌──────────┐      ┌──────────┐      ┌──────────┐
-  │  Node 1  │      │  Node 2  │      │  Node 3  │
-  │ /internal│      │ /internal│      │ /internal│
-  │  store   │      │  store   │      │  store   │
-  │  fetch   │      │  fetch   │      │  fetch   │
-  └──────────┘      └──────────┘      └──────────┘
+┌──────────────────────────────────────────────────────────┐
+│                     Coordinator (port 9000)               │
+│                                                          │
+│  ┌──────────────┐  ┌─────────────────┐  ┌─────────────┐ │
+│  │FileChunkSvc  │  │NodeRegistrySvc  │  │ConsistentH  │ │
+│  │upload/       │  │ALIVE→SUSPECTED  │  │ashRing      │ │
+│  │download/     │  │→DEAD lifecycle  │  │TreeMap ring │ │
+│  │stream        │  │missedHeartbeats │  │50 vnodes    │ │
+│  └──────┬───────┘  └───────┬─────────┘  └──────┬──────┘ │
+│         └──────────────────┴───────────────────-┘        │
+│                       PostgreSQL                          │
+│   file_indices | chunk_placements | storage_nodes        │
+│                                                          │
+│  Schedulers (background):                                │
+│  • HeartbeatScheduler    — marks nodes SUSPECTED/DEAD    │
+│  • ReReplicationScheduler — heals under-replicated chunks│
+└─────────────────────────┬────────────────────────────────┘
+                          │ HTTP /internal/*
+          ┌───────────────┼───────────────┐
+          ▼               ▼               ▼
+    ┌──────────┐    ┌──────────┐    ┌──────────┐
+    │  Node 1  │    │  Node 2  │    │  Node 3  │
+    │  :9001   │    │  :9002   │    │  :9003   │
+    │ /store   │    │ /store   │    │ /store   │
+    │ /fetch   │    │ /fetch   │    │ /fetch   │
+    └──────────┘    └──────────┘    └──────────┘
 ```
 
-### How a file upload works
+### Upload flow
+1. Client POSTs each chunk to `POST /files/chunks`
+2. Coordinator hashes `"fileId-chunk-N"` → finds target nodes via the ring
+3. Pushes chunk bytes to each node via `POST /internal/store`
+4. Saves `ChunkPlacement(fileId, chunkNumber, nodeId, replicaIndex)` to DB
+5. When all chunks received → `FileIndex.status = COMPLETE`
 
-1. Client slices the file into chunks and uploads each one to `POST /files/chunks`
-2. The coordinator computes target nodes for each chunk using the **consistent hash ring**
-3. Each chunk is forwarded to `N` storage nodes via `POST /internal/store` (replication)
-4. Placement records are saved to the database
-5. When all chunks arrive, the file index is marked `COMPLETE`
-
-### How a download works
-
+### Download flow
 1. Client calls `GET /files/download?identifier={fileId}`
-2. Coordinator looks up each chunk's placement records from the database
-3. For each chunk, it tries alive replicas in order until it gets a successful response
-4. Chunk bytes are streamed directly to the client response — no temp merge file needed
+2. Coordinator fetches placements for each chunk in order
+3. Tries each alive replica until one responds 200 OK
+4. Streams bytes directly to client response (no temp disk write)
+
+### Self-healing flow
+```
+Every 10s: HeartbeatScheduler checks lastHeartbeatAt
+  missed 1 window  → SUSPECTED   (no action yet)
+  missed 3 windows → DEAD        → triggers ReReplicationScheduler
+
+Every 20s: ReReplicationScheduler (coordinator only)
+  1. Find all DEAD node IDs
+  2. Query: SELECT DISTINCT fileId WHERE nodeId IN (dead nodes)
+  3. For each affected chunk:
+     - 0 alive replicas  → mark file CORRUPT, clean DB
+     - < replicationFactor alive replicas → fetch from alive node,
+       push to new candidate node, save new ChunkPlacement
+     - dead placements always deleted from DB
+```
 
 ---
 
-## 🚀 Getting Started
+## 🚀 Setup Guide
 
 ### Prerequisites
 
 | Tool | Version |
 |---|---|
-| Java (JDK) | 21+ |
-| Maven Wrapper | Bundled (`./mvnw`) |
-| PostgreSQL | 14+ |
-| Docker + Compose | Optional (for cluster mode) |
+| Java JDK | 21+ |
+| Maven Wrapper | bundled (`./mvnw`) |
+| PostgreSQL | 14+ (or Docker) |
+| Docker + Compose | For full cluster demo |
 
-### 1. Clone the repository
+### Option A — Run Locally (Single Node)
 
 ```bash
-git clone https://github.com/your-username/DistributedStorage.git
+git clone https://github.com/Madhan3009/DistributedStorage.git
 cd DistributedStorage/demo
 ```
 
-### 2. Configure the database
-
-Set these environment variables before running:
-
+**Start PostgreSQL via Docker:**
 ```bash
-export DB_HOST=localhost
-export DB_PORT=5432
-export DB_NAME=user_db
-export DB_USERNAME=postgres
-export DB_PASSWORD=your_password
+docker run -d --name pg \
+  -e POSTGRES_DB=user_db \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=admin \
+  -p 5432:5432 postgres:16
 ```
 
-### 3. Run locally (single node — coordinator mode)
-
+**Run the app (coordinator mode, port 9000):**
 ```bash
 ./mvnw spring-boot:run
 ```
 
-The application starts on **port 9000**. Navigate to `http://localhost:9000/dashboard` to open the admin console.
+> Hibernate auto-creates all tables on first run (`ddl-auto: update`). No SQL scripts needed.
+
+Dashboard: **http://localhost:9000/dashboard**
 
 ---
 
-## 🐳 Running a Multi-Node Cluster with Docker
-
-This spins up **1 coordinator + 3 storage nodes + PostgreSQL** as separate containers.
+### Option B — Full 4-Node Docker Cluster
 
 ```bash
-# From the demo/ directory
-# 1. Package the application JAR
+cd DistributedStorage/demo
+
+# Build the JAR first
 ./mvnw clean package -DskipTests
 
-# 2. Build and start the containers
+# Start coordinator + 3 storage nodes + PostgreSQL
 docker compose up --build
 ```
 
-| Service | Port | Role |
+| Container | Port | Role |
 |---|---|---|
-| `coordinator` | 9000 | Metadata authority, hash ring, file API |
+| `coordinator` | 9000 | Metadata, upload/download API, re-replication |
 | `node-1` | 9001 | Chunk storage |
 | `node-2` | 9002 | Chunk storage |
 | `node-3` | 9003 | Chunk storage |
-| `postgres` | 5432 | Shared metadata database |
+| `postgres` | 5432 | Shared metadata DB |
 
-Storage nodes auto-register with the coordinator on startup and send heartbeats every 10 seconds.
+Nodes self-register with the coordinator on startup via `NodeHeartbeatSender`.
+
+---
+
+## 🧪 Run Tests
+
+```bash
+cd DistributedStorage/demo
+./mvnw test
+```
+
+Tests use **H2 in-memory DB** — no PostgreSQL needed.
+
+| Test Class | What It Covers |
+|---|---|
+| `ConsistentHashRingTest` | Ring distribution, virtual nodes, deduplication |
+| `AuthControllerTests` | Register → login → JWT token → access protected endpoint |
+| `DistributedStorageIntegrationTest` | Upload → kill node → register candidate → run healer → verify placement → re-download |
+| `ReReplicationSchedulerTest` | No dead nodes, under-replication healing, total data loss CORRUPT state |
+| `DemoApplicationTests` | Spring context loads successfully |
+
+---
+
+## 🎬 Live Demo Script (for interviews)
+
+> Run through this to show the system live. Takes ~3 minutes.
+
+### Step 1 — Register and Login
+```bash
+# Register
+curl -s -X POST http://localhost:9000/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username":"demo","email":"demo@test.com","password":"demo123"}' | jq .
+
+# Login → copy the token
+TOKEN=$(curl -s -X POST http://localhost:9000/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username":"demo","password":"demo123"}' | jq -r .token)
+
+echo "Token: $TOKEN"
+```
+
+### Step 2 — Upload a file (2 chunks)
+```bash
+# Create a test file
+echo "Hello Cisco World - Part 1" > /tmp/part0.txt
+echo "Hello Cisco World - Part 2" > /tmp/part1.txt
+
+FILE_ID="cisco-demo-$(date +%s)"
+
+# Upload chunk 0
+curl -s -X POST http://localhost:9000/files/chunks \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@/tmp/part0.txt" \
+  -F "chunkNumber=0" \
+  -F "totalChunks=2" \
+  -F "identifier=$FILE_ID"
+
+# Upload chunk 1
+curl -s -X POST http://localhost:9000/files/chunks \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@/tmp/part1.txt" \
+  -F "chunkNumber=1" \
+  -F "totalChunks=2" \
+  -F "identifier=$FILE_ID"
+```
+
+### Step 3 — Download the file back
+```bash
+curl -s "http://localhost:9000/files/download?identifier=$FILE_ID" \
+  -H "Authorization: Bearer $TOKEN" -o /tmp/rebuilt.txt
+
+cat /tmp/rebuilt.txt   # Should show both parts concatenated
+```
+
+### Step 4 — Simulate a node failure and observe self-healing
+```bash
+# Check current node status
+curl -s http://localhost:9000/nodes | jq .
+
+# In Docker cluster: stop node-1
+docker stop node-1
+
+# Wait ~30-40 seconds for the heartbeat scheduler to mark it DEAD
+# Then verify download still works (falls back to node-2/node-3)
+curl -s "http://localhost:9000/files/download?identifier=$FILE_ID" \
+  -H "Authorization: Bearer $TOKEN" -o /tmp/rebuilt-after-failure.txt
+
+cat /tmp/rebuilt-after-failure.txt   # Still works!
+
+# After ~20 more seconds, re-replication fires automatically
+# Check placements moved to healthy nodes:
+curl -s http://localhost:9000/nodes | jq .
+```
 
 ---
 
@@ -141,154 +279,107 @@ Storage nodes auto-register with the coordinator on startup and send heartbeats 
 
 ### Authentication
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/auth/register` | Register a new user |
-| `POST` | `/auth/login` | Login and receive a JWT token |
-| `GET` | `/api/me` | Returns the authenticated username |
+| Method | Endpoint | Body / Params | Description |
+|---|---|---|---|
+| `POST` | `/auth/register` | `{username, email, password}` | Create account |
+| `POST` | `/auth/login` | `{username, password}` | Returns JWT token |
 
-#### Register
-
-```bash
-curl -X POST http://localhost:9000/auth/register \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","email":"alice@example.com","password":"secret123"}'
-```
-
-#### Login
-
-```bash
-curl -X POST http://localhost:9000/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"alice","password":"secret123"}'
-# Returns: {"token":"eyJ...", "username":"alice"}
-```
-
-### File Operations
-
-All file endpoints require `Authorization: Bearer <token>`.
+### Files *(require `Authorization: Bearer <token>`)*
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/files/chunks` | Upload one chunk of a file |
-| `GET` | `/files` | List all files owned by the current user |
-| `GET` | `/files/download?identifier={id}` | Download and reassemble a file |
+| `POST` | `/files/chunks` | Upload one chunk (`file`, `chunkNumber`, `totalChunks`, `identifier`) |
+| `GET` | `/files` | List all files for current user |
+| `GET` | `/files/download?identifier={id}` | Stream-download a file |
 
-#### Upload a file chunk
-
-```bash
-curl -X POST http://localhost:9000/files/chunks \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -F "file=@/path/to/chunk.part" \
-  -F "chunkNumber=0" \
-  -F "totalChunks=3" \
-  -F "identifier=my-unique-file-id"
-```
-
-#### Download a file
-
-```bash
-curl -o output_file.bin \
-  "http://localhost:9000/files/download?identifier=my-unique-file-id" \
-  -H "Authorization: Bearer YOUR_TOKEN"
-```
-
-### Node Management
+### Nodes *(public)*
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/nodes/register` | Register a storage node |
-| `POST` | `/nodes/heartbeat` | Send a node heartbeat |
-| `GET` | `/nodes` | List all registered nodes |
-| `POST` | `/nodes/{nodeId}/fail` | Mark a node as dead (simulate failure) |
+| `GET` | `/nodes` | List all nodes with status and disk metrics |
+| `POST` | `/nodes/register?nodeId=&host=&port=` | Register a node |
+| `POST` | `/nodes/heartbeat?nodeId=&diskUsed=&diskFree=` | Update heartbeat + disk stats |
 
 ### Observability
 
 | Endpoint | Description |
 |---|---|
-| `GET /actuator/health` | Application health check |
-| `GET /actuator/metrics` | JVM and application metrics |
+| `GET /actuator/health` | Liveness check |
+| `GET /actuator/metrics` | JVM + custom `replication.healed.chunks` / `replication.failed.chunks` |
 
 ---
 
 ## ⚙️ Configuration Reference
 
-All properties can be overridden via environment variables:
+All overridable via environment variables:
 
-| Environment Variable | Default | Description |
+| Variable | Default | Description |
 |---|---|---|
 | `PORT` | `9000` | HTTP server port |
-| `DB_HOST` | `localhost` | PostgreSQL host |
+| `DB_HOST` | `postgres` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |
 | `DB_NAME` | `user_db` | Database name |
-| `DB_USERNAME` | `postgres` | Database username |
-| `DB_PASSWORD` | *(required)* | Database password |
+| `DB_USERNAME` | `postgres` | DB username |
+| `DB_PASSWORD` | `admin` | DB password |
 | `APP_ROLE` | `COORDINATOR` | `COORDINATOR` or `NODE` |
-| `APP_REPLICATION_FACTOR` | `3` | Number of replicas per chunk |
+| `APP_REPLICATION_FACTOR` | `3` | Replicas per chunk |
 | `APP_MAX_CHUNKS` | `10` | Max chunks per file |
-| `APP_COORDINATOR_URL` | `http://localhost:9000` | Coordinator base URL (NODE role only) |
-| `APP_NODE_ID` | `coordinator` | Unique identifier for this node |
+| `APP_COORDINATOR_URL` | `http://localhost:9000` | Coordinator URL (NODE role only) |
+| `APP_NODE_ID` | `coordinator` | Unique node identifier |
 | `APP_HOST` | `localhost` | Host this node is reachable on |
-
----
-
-## 🧪 Testing
-
-Tests run against an isolated **H2 in-memory database** and do not touch your PostgreSQL instance.
-
-```bash
-./mvnw test
-```
-
-### Test coverage
-
-| Test Class | What it tests |
-|---|---|
-| `ConsistentHashRingTest` | Hash ring distribution, virtual nodes, replica selection |
-| `AuthControllerTests` | Register → login → access protected endpoint |
-| `DistributedStorageIntegrationTest` | End-to-end: upload chunks → kill node → download via failover |
-| `DemoApplicationTests` | Spring context loads cleanly |
+| `APP_TEMP_DIR` | `temp/` | Local staging directory |
+| `APP_UPLOAD_DIR` | `uploads/` | Assembled file directory |
 
 ---
 
 ## 🗂️ Project Structure
 
 ```
-src/
-├── main/
-│   ├── java/com/dSystems/demo/
-│   │   ├── Config/
-│   │   │   ├── AppConfig.java            # Security filter chain
-│   │   │   └── StorageProperties.java    # @ConfigurationProperties
-│   │   ├── Controller/
-│   │   │   ├── AuthController.java       # Register / Login
-│   │   │   ├── FileChunkController.java  # Upload / Download / List
-│   │   │   ├── NodeController.java       # Node registry admin
-│   │   │   ├── InternalNodeController.java # Peer-to-peer chunk I/O
-│   │   │   └── DashboardController.java  # Redirect to dashboard UI
-│   │   ├── Model/
-│   │   │   ├── FileIndex.java            # File metadata entity
-│   │   │   ├── ChunkPlacement.java       # Replica location entity
-│   │   │   └── StorageNode.java          # Node registration entity
-│   │   ├── Repository/                   # Spring Data JPA repositories
-│   │   ├── Scheduler/
-│   │   │   ├── HeartbeatScheduler.java   # Prune dead nodes
-│   │   │   ├── ReReplicationScheduler.java # Heal under-replicated chunks
-│   │   │   └── NodeHeartbeatSender.java  # Self-register when in NODE role
-│   │   ├── Security/                     # JWT filter & helper
-│   │   └── Service/
-│   │       ├── ConsistentHashRing.java   # TreeMap-based virtual node ring
-│   │       ├── FileChunkService.java     # Upload, download, replication logic
-│   │       └── NodeRegistryService.java  # Node lifecycle management
-│   └── resources/
-│       ├── application.yml
-│       └── static/dashboard/index.html   # Admin console UI
-└── test/
-    └── java/com/dSystems/demo/
-        ├── ConsistentHashRingTest.java
-        ├── AuthControllerTests.java
-        └── DistributedStorageIntegrationTest.java
+demo/src/main/java/com/dSystems/demo/
+├── Config/
+│   ├── AppConfig.java              # Spring Security filter chain + RestTemplate bean
+│   └── StorageProperties.java      # @ConfigurationProperties binding
+├── Controller/
+│   ├── AuthController.java         # Register / Login
+│   ├── FileChunkController.java    # Upload / Download / List
+│   ├── NodeController.java         # Node registry admin
+│   ├── InternalNodeController.java # /internal/store, /fetch, /delete (node-to-node)
+│   └── DashboardController.java    # Serves the web UI
+├── Model/
+│   ├── FileIndex.java              # File metadata (PENDING→COMPLETE→CORRUPT)
+│   ├── ChunkPlacement.java         # Replica location records
+│   ├── StorageNode.java            # Node with missedHeartbeats counter
+│   └── AppUser.java                # User account entity
+├── Repository/                     # Spring Data JPA interfaces
+├── Scheduler/
+│   ├── HeartbeatScheduler.java     # Polls lastHeartbeatAt → SUSPECTED/DEAD transitions
+│   ├── ReReplicationScheduler.java # Self-healing: fetch → push → update placements
+│   └── NodeHeartbeatSender.java    # NODE role: sends /register + /heartbeat every 10s
+├── Security/
+│   ├── JWTHelper.java              # Token generation & validation (HS512)
+│   ├── JWTAuthenticationFilter.java# Extracts Bearer token, populates SecurityContext
+│   └── CustomUserDetailsService.java
+└── Service/
+    ├── ConsistentHashRing.java     # TreeMap-based ring, 50 virtual nodes per physical node
+    ├── FileChunkService.java       # Core upload / download / streaming logic
+    └── NodeRegistryService.java    # Node lifecycle: register, heartbeat, handleMissedHeartbeat
 ```
+
+---
+
+## 💡 Key Design Decisions (Interview Talking Points)
+
+| Decision | Why |
+|---|---|
+| **Coordinator-Worker** | Centralized metadata = no distributed consensus needed for placement |
+| **Consistent Hashing** | Adding/removing nodes only remaps O(K/N) keys, not all keys |
+| **50 virtual nodes** | Prevents hot spots when physical node count is small |
+| **ALIVE→SUSPECTED→DEAD** | 3 missed heartbeats before DEAD avoids false positives from GC pauses |
+| **`AtomicBoolean` run lock** | Non-blocking CAS prevents overlapping healer runs without thread blocking |
+| **`@ConditionalOnProperty`** | Ensures re-replication only runs on coordinator — prevents race conditions in multi-node deploy |
+| **Stream-on-download** | Chunks piped directly to response `OutputStream` — memory usage bounded by chunk size, not file size |
+| **H2 for tests** | Full JPA integration with zero infrastructure dependency |
+| **`CORRUPT` status** | Explicit signalling when total data loss is detected; prevents silent failures |
 
 ---
 
@@ -298,12 +389,12 @@ src/
 |---|---|
 | Language | Java 21 |
 | Framework | Spring Boot 4 |
-| Security | Spring Security + JJWT |
+| Security | Spring Security + JJWT (HS512) |
 | Persistence | Spring Data JPA + Hibernate |
-| Database (runtime) | PostgreSQL |
-| Database (tests) | H2 (in-memory) |
-| Cluster communication | HTTP (RestTemplate) |
-| Observability | Spring Boot Actuator |
+| Database (runtime) | PostgreSQL 14+ |
+| Database (tests) | H2 in-memory |
+| Node communication | HTTP REST (`RestTemplate`) |
+| Observability | Spring Boot Actuator + Micrometer |
 | Containerization | Docker + Docker Compose |
 
 ---
