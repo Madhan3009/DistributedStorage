@@ -708,9 +708,6 @@
         }
 
         async function processUpload(file) {
-            const fileId = "file-" + Math.random().toString(36).substr(2, 9);
-            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            
             document.getElementById('upload-progress-container').style.display = 'block';
             document.getElementById('upload-filename').innerText = file.name;
             const fill = document.getElementById('upload-fill');
@@ -719,44 +716,50 @@
             fill.style.width = '0%';
             percentTxt.innerText = '0%';
 
-            for (let i = 0; i < totalChunks; i++) {
-                const start = i * CHUNK_SIZE;
-                const end = Math.min(start + CHUNK_SIZE, file.size);
-                const chunk = file.slice(start, end);
+            const formData = new FormData();
+            formData.append("file", file);
 
-                const formData = new FormData();
-                formData.append("file", chunk, file.name);
-                formData.append("chunkNumber", i);
-                formData.append("totalChunks", totalChunks);
-                formData.append("identifier", fileId);
-
-                try {
-                    const res = await fetch('/files/chunks', {
-                        method: 'POST',
-                        headers: { 'Authorization': `Bearer ${getToken()}` }, // No Content-Type for FormData
-                        body: formData
-                    });
-
-                    if (!res.ok) {
-                        const errMsg = await res.text();
-                        throw new Error(errMsg || `Chunk ${i} failed`);
+            try {
+                const xhr = new XMLHttpRequest();
+                
+                xhr.upload.onprogress = (event) => {
+                    if (event.lengthComputable) {
+                        const percent = Math.round((event.loaded / event.total) * 100);
+                        // Scale progress to max 90% during actual network upload,
+                        // reserving the remaining 10% for coordinator distribution logic
+                        const displayPercent = Math.min(Math.round(percent * 0.9), 90);
+                        fill.style.width = displayPercent + '%';
+                        percentTxt.innerText = displayPercent + '%';
                     }
+                };
 
-                    const percent = Math.round(((i + 1) / totalChunks) * 100);
-                    fill.style.width = percent + '%';
-                    percentTxt.innerText = percent + '%';
-                } catch (e) {
-                    showToast(`Upload failed: ${e.message}`, "error");
+                const responsePromise = new Promise((resolve, reject) => {
+                    xhr.open('POST', '/files/upload');
+                    xhr.setRequestHeader('Authorization', `Bearer ${getToken()}`);
+                    xhr.onload = () => {
+                        if (xhr.status >= 200 && xhr.status < 300) {
+                            resolve(xhr.responseText);
+                        } else {
+                            reject(new Error(xhr.responseText || `Upload failed with status ${xhr.status}`));
+                        }
+                    };
+                    xhr.onerror = () => reject(new Error('Network error'));
+                    xhr.send(formData);
+                });
+
+                await responsePromise;
+
+                fill.style.width = '100%';
+                percentTxt.innerText = '100%';
+                showToast("Upload completed!", "success");
+            } catch (e) {
+                showToast(`Upload failed: ${e.message}`, "error");
+            } finally {
+                setTimeout(() => {
                     document.getElementById('upload-progress-container').style.display = 'none';
-                    return;
-                }
+                }, 2000);
+                fetchData();
             }
-
-            showToast("Upload completed!", "success");
-            setTimeout(() => {
-                document.getElementById('upload-progress-container').style.display = 'none';
-            }, 2000);
-            fetchData();
         }
 
         // --- Toasts ---

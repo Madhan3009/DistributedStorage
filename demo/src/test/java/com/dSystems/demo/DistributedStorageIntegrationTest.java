@@ -5,8 +5,10 @@ import com.dSystems.demo.Model.ChunkPlacement;
 import com.dSystems.demo.Model.FileIndex;
 import com.dSystems.demo.Repository.ChunkPlacementRepository;
 import com.dSystems.demo.Repository.FileIndexRepository;
+import com.dSystems.demo.Repository.StorageNodeRepository;
 import com.dSystems.demo.Service.NodeRegistryService;
 import com.dSystems.demo.Scheduler.ReReplicationScheduler;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -59,10 +61,20 @@ class DistributedStorageIntegrationTest {
     private FileIndexRepository fileIndexRepository;
 
     @Autowired
+    private StorageNodeRepository storageNodeRepository;
+
+    @Autowired
     private StorageProperties storageProperties;
 
     @Autowired
     private ReReplicationScheduler reReplicationScheduler;
+
+    @BeforeEach
+    void setUp() {
+        chunkPlacementRepository.deleteAll();
+        fileIndexRepository.deleteAll();
+        storageNodeRepository.deleteAll();
+    }
 
     /**
      * Test Case: Uploads a file, verifies replication, kills a server, and verifies download still works.
@@ -163,6 +175,95 @@ class DistributedStorageIntegrationTest {
         // It should download correctly from node-2 and/or node-3.
         byte[] downloadedBytesAfterFailure = downloadFileDirect(fileId, token);
         assertEquals("Hello World!", new String(downloadedBytesAfterFailure));
+    }
+
+    @Test
+    void testWholeFileUploadAndFaultTolerance() throws Exception {
+        // Step 1: Set our system backup safety requirement to 2 copies per chunk
+        storageProperties.setReplicationFactor(2);
+
+        // Step 2: Register 2 storage servers in the coordinator's registry.
+        nodeRegistryService.registerNode("node-4", "localhost", port);
+        nodeRegistryService.registerNode("node-5", "localhost", port);
+
+        // Step 3: Create a test user and log in
+        String username = "wholefileuser_" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String registerPayload = """
+                {
+                  "username": "%s",
+                  "email": "%s@example.com",
+                  "password": "secret123"
+                }
+                """.formatted(username, username);
+
+        HttpClient client = HttpClient.newHttpClient();
+        HttpRequest registerReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/auth/register"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(registerPayload))
+                .build();
+        client.send(registerReq, HttpResponse.BodyHandlers.ofString());
+
+        String loginPayload = """
+                {
+                  "username": "%s",
+                  "password": "secret123"
+                }
+                """.formatted(username);
+        HttpRequest loginReq = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/auth/login"))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(loginPayload))
+                .build();
+        HttpResponse<String> loginResponse = client.send(loginReq, HttpResponse.BodyHandlers.ofString());
+        String token = loginResponse.body().replaceAll(".*\"token\":\"([^\"]+)\".*", "$1");
+
+        // Step 4: Perform whole file upload
+        String testContentString = "A".repeat(120 * 1024);
+        byte[] contentBytes = testContentString.getBytes();
+
+        Path tempFile = Files.createTempFile("whole-file-test-", ".txt");
+        Files.write(tempFile, contentBytes);
+
+        RestTemplate restTemplate = new RestTemplate();
+        LinkedMultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+        body.add("file", new org.springframework.core.io.FileSystemResource(tempFile.toFile()));
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        headers.set("Authorization", "Bearer " + token);
+
+        HttpEntity<LinkedMultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+        ResponseEntity<String> response = restTemplate.postForEntity(
+                "http://localhost:" + port + "/files/upload",
+                requestEntity,
+                String.class
+        );
+
+        Files.deleteIfExists(tempFile);
+
+        assertEquals(HttpStatus.OK.value(), response.getStatusCode().value());
+
+        String responseBody = response.getBody();
+        assertNotNull(responseBody);
+        assertTrue(responseBody.contains("with ID file-"));
+        String fileId = responseBody.replaceAll(".*with ID (file-\\w+).*", "$1").trim();
+
+        // Step 5: Verify the coordinator has correctly cataloged the backup placements.
+        FileIndex index = fileIndexRepository.findByFileId(fileId).orElseThrow();
+        assertEquals("COMPLETE", index.getStatus());
+        assertEquals(contentBytes.length, index.getFileSize());
+        int totalChunks = index.getTotalChunks();
+        assertTrue(totalChunks > 0);
+
+        for (int i = 0; i < totalChunks; i++) {
+            List<ChunkPlacement> placements = chunkPlacementRepository.findByFileIdAndChunkNumber(fileId, i);
+            assertEquals(2, placements.size());
+        }
+
+        // Step 6: Test downloading the file.
+        byte[] downloadedBytes = downloadFileDirect(fileId, token);
+        assertEquals(testContentString, new String(downloadedBytes));
     }
 
     /**

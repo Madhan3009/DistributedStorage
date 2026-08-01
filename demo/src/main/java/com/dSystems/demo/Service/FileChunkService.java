@@ -267,6 +267,173 @@ public class FileChunkService {
     }
 
     /**
+     * Receives a complete file, splits it into chunks internally, and distributes the chunks.
+     */
+    public ChunkUploadResult uploadFile(MultipartFile file, String username) throws IOException {
+        String originalFileName = file.getOriginalFilename();
+        if (file.isEmpty()) {
+            return new ChunkUploadResult(HttpStatus.BAD_REQUEST, "File is empty");
+        }
+        if (originalFileName == null || originalFileName.isBlank() || originalFileName.contains("..")) {
+            return new ChunkUploadResult(HttpStatus.BAD_REQUEST, "Invalid file name");
+        }
+
+        // Get list of active storage servers
+        List<StorageNode> aliveNodes = nodeRegistryService.getAliveNodes();
+        if (aliveNodes.isEmpty()) {
+            return new ChunkUploadResult(HttpStatus.SERVICE_UNAVAILABLE, "No alive storage nodes available");
+        }
+
+        // Generate a unique identifier for the file
+        String identifier = "file-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+
+        // Check if the temporary folder path is safe from directory traversal hacks
+        Path chunkDirectory = tempPath.resolve(identifier).normalize();
+        if (!chunkDirectory.startsWith(tempPath)) {
+            return new ChunkUploadResult(HttpStatus.BAD_REQUEST, "Invalid chunk path");
+        }
+
+        // Create a subfolder for this file's chunks on the coordinator
+        Files.createDirectories(chunkDirectory);
+
+        long fileLength = file.getSize();
+        int chunkSize = 50 * 1024; // 50 KB
+        int totalChunks = (int) Math.ceil((double) fileLength / chunkSize);
+        if (totalChunks > maxChunksPerFile) {
+            totalChunks = maxChunksPerFile;
+            chunkSize = (int) Math.ceil((double) fileLength / totalChunks);
+        }
+        if (totalChunks <= 0) {
+            totalChunks = 1;
+        }
+
+        // Create new catalog record.
+        FileIndex fileIndex = new FileIndex();
+        fileIndex.setFileId(identifier);
+        fileIndex.setFileName(originalFileName);
+        fileIndex.setTotalChunks(totalChunks);
+        fileIndex.setOwnerUsername(username);
+        fileIndex.setUploadedAt(LocalDateTime.now());
+        fileIndex.setStatus("PENDING");
+        fileIndex.setFileSize(0L);
+        fileIndex = fileIndexRepository.save(fileIndex);
+
+        RestTemplate restTemplate = new RestTemplate();
+        int replicationFactor = storageProperties.getReplicationFactor();
+        long totalSize = 0;
+
+        try (java.io.InputStream is = file.getInputStream()) {
+            for (int chunkNumber = 0; chunkNumber < totalChunks; chunkNumber++) {
+                int currentChunkSize = (chunkNumber == totalChunks - 1) ? (int) (fileLength - (long) chunkNumber * chunkSize) : chunkSize;
+                if (currentChunkSize < 0) currentChunkSize = 0;
+
+                byte[] chunkBytes = new byte[currentChunkSize];
+                int offset = 0;
+                int read;
+                while (offset < currentChunkSize && (read = is.read(chunkBytes, offset, currentChunkSize - offset)) != -1) {
+                    offset += read;
+                }
+
+                // Save chunk locally in temp staging
+                Path chunkFile = chunkDirectory.resolve("chunk-" + chunkNumber + ".part");
+                Files.write(chunkFile, chunkBytes);
+                totalSize += chunkBytes.length;
+
+                // Assign destination servers
+                List<StorageNode> targetNodes = consistentHashRing.getNodesForKey(
+                        identifier + "-chunk-" + chunkNumber,
+                        replicationFactor,
+                        aliveNodes
+                );
+
+                if (targetNodes.isEmpty()) {
+                    // Clean up
+                    try (var paths = Files.walk(chunkDirectory)) {
+                        paths.sorted(Comparator.reverseOrder())
+                             .map(Path::toFile)
+                             .forEach(java.io.File::delete);
+                    } catch (IOException e) {
+                        LOGGER.warn("Could not clean up coordinator staging dir: {}", e.getMessage());
+                    }
+                    fileIndexRepository.delete(fileIndex);
+                    return new ChunkUploadResult(HttpStatus.SERVICE_UNAVAILABLE, "Could not assign storage nodes for chunk " + chunkNumber);
+                }
+
+                int replicaIndex = 0;
+                for (StorageNode targetNode : targetNodes) {
+                    String url = String.format("http://%s:%d/internal/store", targetNode.getHost(), targetNode.getPort());
+                    try {
+                        LinkedMultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+                        body.add("fileId", identifier);
+                        body.add("chunkNumber", chunkNumber);
+                        body.add("file", new FileSystemResource(chunkFile.toFile()));
+
+                        HttpHeaders headers = new HttpHeaders();
+                        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+
+                        HttpEntity<LinkedMultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+                        restTemplate.postForEntity(url, requestEntity, String.class);
+
+                        ChunkPlacement placement = new ChunkPlacement();
+                        placement.setFileId(identifier);
+                        placement.setChunkNumber(chunkNumber);
+                        placement.setNodeId(targetNode.getNodeId());
+                        placement.setReplicaIndex(replicaIndex++);
+                        chunkPlacementRepository.save(placement);
+                    } catch (Exception e) {
+                        LOGGER.error("Failed to replicate chunk {} to node {}: {}", chunkNumber, targetNode.getNodeId(), e.getMessage());
+                    }
+                }
+
+                if (replicaIndex == 0) {
+                    // Clean up
+                    try (var paths = Files.walk(chunkDirectory)) {
+                        paths.sorted(Comparator.reverseOrder())
+                             .map(Path::toFile)
+                             .forEach(java.io.File::delete);
+                    } catch (IOException e) {
+                        LOGGER.warn("Could not clean up coordinator staging dir: {}", e.getMessage());
+                    }
+                    fileIndexRepository.delete(fileIndex);
+                    List<ChunkPlacement> placements = chunkPlacementRepository.findByFileId(identifier);
+                    chunkPlacementRepository.deleteAll(placements);
+                    return new ChunkUploadResult(HttpStatus.INTERNAL_SERVER_ERROR, "Failed to store chunk " + chunkNumber + " on any target node");
+                }
+            }
+        } catch (Exception e) {
+            LOGGER.error("Error during whole file upload/chunking: {}", e.getMessage());
+            try (var paths = Files.walk(chunkDirectory)) {
+                paths.sorted(Comparator.reverseOrder())
+                     .map(Path::toFile)
+                     .forEach(java.io.File::delete);
+            } catch (IOException ioEx) {
+                LOGGER.warn("Could not clean up coordinator staging dir: {}", ioEx.getMessage());
+            }
+            fileIndexRepository.delete(fileIndex);
+            List<ChunkPlacement> placements = chunkPlacementRepository.findByFileId(identifier);
+            chunkPlacementRepository.deleteAll(placements);
+            return new ChunkUploadResult(HttpStatus.INTERNAL_SERVER_ERROR, "Error uploading file: " + e.getMessage());
+        }
+
+        // Update catalog status to COMPLETE
+        fileIndex.setStatus("COMPLETE");
+        fileIndex.setFileSize(totalSize);
+        fileIndexRepository.save(fileIndex);
+
+        // Clean up staging directory
+        try (var paths = Files.walk(chunkDirectory)) {
+            paths.sorted(Comparator.reverseOrder())
+                 .map(Path::toFile)
+                 .forEach(java.io.File::delete);
+        } catch (IOException e) {
+            LOGGER.warn("Could not clean up coordinator staging dir: {}", e.getMessage());
+        }
+
+        LOGGER.info("Successfully chunked, uploaded and replicated file {} with ID {} ({} chunks)", originalFileName, identifier, totalChunks);
+        return new ChunkUploadResult(HttpStatus.OK, "File uploaded and distributed successfully with ID " + identifier);
+    }
+
+    /**
      * Rebuilds a file by gathering all its pieces from the servers and saving the assembled file in the uploads folder.
      */
     public FileRebuildResult rebuildFile(String identifier, String username) throws IOException {

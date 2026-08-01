@@ -69,6 +69,20 @@ public class FileChunkController {
     }
 
     /**
+     * SERVICE: Upload a complete file to be chunked and distributed by the coordinator.
+     * Web URL: POST http://localhost:8080/files/upload
+     */
+    @PostMapping("/upload")
+    public ResponseEntity<String> uploadFile(
+            @RequestParam("file") MultipartFile file,
+            Authentication authentication
+    ) throws IOException {
+        String username = authentication.getName();
+        FileChunkService.ChunkUploadResult result = fileChunkService.uploadFile(file, username);
+        return ResponseEntity.status(result.status()).body(result.message());
+    }
+
+    /**
      * SERVICE: Stitch the file back together on the server.
      * Web URL: POST http://localhost:8080/files/rebuild
      */
