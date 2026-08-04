@@ -199,7 +199,7 @@ Tests use **H2 in-memory DB** — no PostgreSQL needed.
 
 ---
 
-## 🎬 Live Demo Script (for interviews)
+## 🎬 Curl commands
 
 > Run through this to show the system live. Takes ~3 minutes.
 
