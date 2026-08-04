@@ -15,9 +15,7 @@ Files are automatically split into chunks, replicated across nodes, and self-hea
 
 ---
 
-## ⚡ Interview Quick-Start (TL;DR)
-
-> Clone → start PostgreSQL → run coordinator → demo in under 5 minutes.
+## ⚡ How to run it 
 
 ```bash
 # 1. Clone
