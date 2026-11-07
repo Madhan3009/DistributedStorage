@@ -29,10 +29,14 @@ docker run -d --name pg \
   -e POSTGRES_PASSWORD=admin \
   -p 5432:5432 postgres:16
 
-# 3. Run the coordinator (default port 9000)
+# 3. Set the required secrets
+export APP_JWT_SECRET=$(openssl rand -hex 32)
+export APP_CLUSTER_SECRET=$(openssl rand -hex 32)
+
+# 4. Run the coordinator (default port 9000)
 ./mvnw spring-boot:run
 
-# 4. Open the dashboard
+# 5. Open the dashboard
 # → http://localhost:9000/dashboard
 ```
 
@@ -147,6 +151,8 @@ docker run -d --name pg \
 
 **Run the app (coordinator mode, port 9000):**
 ```bash
+export APP_JWT_SECRET=$(openssl rand -hex 32)
+export APP_CLUSTER_SECRET=$(openssl rand -hex 32)
 ./mvnw spring-boot:run
 ```
 
@@ -160,6 +166,11 @@ Dashboard: **http://localhost:9000/dashboard**
 
 ```bash
 cd DistributedStorage/demo
+
+# Create .env with the required secrets
+cp .env.example .env
+sed -i "s/^APP_JWT_SECRET=.*/APP_JWT_SECRET=$(openssl rand -hex 32)/" .env
+sed -i "s/^APP_CLUSTER_SECRET=.*/APP_CLUSTER_SECRET=$(openssl rand -hex 32)/" .env
 
 # Build the JAR first
 ./mvnw clean package -DskipTests
@@ -254,7 +265,7 @@ cat /tmp/rebuilt.txt   # Should show both parts concatenated
 ### Step 4 — Simulate a node failure and observe self-healing
 ```bash
 # Check current node status
-curl -s http://localhost:9000/nodes | jq .
+curl -s http://localhost:9000/nodes -H "Authorization: Bearer $TOKEN" | jq .
 
 # In Docker cluster: stop node-1
 docker stop node-1
@@ -268,7 +279,7 @@ cat /tmp/rebuilt-after-failure.txt   # Still works!
 
 # After ~20 more seconds, re-replication fires automatically
 # Check placements moved to healthy nodes:
-curl -s http://localhost:9000/nodes | jq .
+curl -s http://localhost:9000/nodes -H "Authorization: Bearer $TOKEN" | jq .
 ```
 
 ---
@@ -290,13 +301,18 @@ curl -s http://localhost:9000/nodes | jq .
 | `GET` | `/files` | List all files for current user |
 | `GET` | `/files/download?identifier={id}` | Stream-download a file |
 
-### Nodes *(public)*
+### Nodes
 
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/nodes` | List all nodes with status and disk metrics |
-| `POST` | `/nodes/register?nodeId=&host=&port=` | Register a node |
-| `POST` | `/nodes/heartbeat?nodeId=&diskUsed=&diskFree=` | Update heartbeat + disk stats |
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `GET` | `/nodes` | `Authorization: Bearer <token>` | List all nodes with status and disk metrics |
+| `POST` | `/nodes/{nodeId}/fail` | `Authorization: Bearer <token>` | Mark a node DEAD to simulate a failure |
+| `POST` | `/nodes/register?nodeId=&host=&port=` | `X-Cluster-Token: <secret>` | Register a node |
+| `POST` | `/nodes/heartbeat?nodeId=&diskUsed=&diskFree=` | `X-Cluster-Token: <secret>` | Update heartbeat + disk stats |
+
+### Internal *(require `X-Cluster-Token: <secret>`)*
+
+`/internal/**` carries chunk traffic between the coordinator and storage nodes. Clients use `/files` instead.
 
 ### Observability
 
@@ -313,6 +329,8 @@ All overridable via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
+| `APP_JWT_SECRET` | **required** | Signs user login tokens (at least 32 characters) |
+| `APP_CLUSTER_SECRET` | **required** | Authenticates coordinator and node traffic; must match on every instance (at least 32 characters) |
 | `PORT` | `9000` | HTTP server port |
 | `DB_HOST` | `postgres` | PostgreSQL host |
 | `DB_PORT` | `5432` | PostgreSQL port |

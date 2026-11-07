@@ -59,6 +59,8 @@ export DB_PORT=5432
 export DB_NAME=user_db
 export DB_USERNAME=postgres
 export DB_PASSWORD=your_password
+export APP_JWT_SECRET=$(openssl rand -hex 32)
+export APP_CLUSTER_SECRET=$(openssl rand -hex 32)
 ```
 
 **Step 3 — Start the application**
@@ -81,7 +83,7 @@ http://localhost:9000/dashboard
 ```
 
 In this mode, the application acts as the **COORDINATOR** (default role).  
-You can manually register storage nodes against it using `POST /nodes/register`.
+You can manually register storage nodes against it using `POST /nodes/register` with the `X-Cluster-Token` header.
 
 ---
 
@@ -100,6 +102,11 @@ cd /home/madhan/Desktop/DistributedStorage/demo
 **Step 2 — Package the app and start all containers**
 
 ```bash
+# Create .env with the required secrets
+cp .env.example .env
+sed -i "s/^APP_JWT_SECRET=.*/APP_JWT_SECRET=$(openssl rand -hex 32)/" .env
+sed -i "s/^APP_CLUSTER_SECRET=.*/APP_CLUSTER_SECRET=$(openssl rand -hex 32)/" .env
+
 # Package the application JAR file first
 ./mvnw clean package -DskipTests
 
@@ -369,7 +376,7 @@ Storage nodes register themselves with the coordinator. You can inspect and mana
 ### View all registered nodes
 
 ```bash
-curl http://localhost:9000/nodes
+curl http://localhost:9000/nodes -H "Authorization: Bearer $TOKEN"
 ```
 
 **Response:**
@@ -399,13 +406,15 @@ curl http://localhost:9000/nodes
 ### Manually register a node
 
 ```bash
-curl -X POST "http://localhost:9000/nodes/register?nodeId=node-4&host=localhost&port=9004"
+curl -X POST "http://localhost:9000/nodes/register?nodeId=node-4&host=localhost&port=9004" \
+  -H "X-Cluster-Token: $APP_CLUSTER_SECRET"
 ```
 
 ### Send a heartbeat from a node
 
 ```bash
-curl -X POST "http://localhost:9000/nodes/heartbeat?nodeId=node-1&diskUsed=2097152&diskFree=104857600"
+curl -X POST "http://localhost:9000/nodes/heartbeat?nodeId=node-1&diskUsed=2097152&diskFree=104857600" \
+  -H "X-Cluster-Token: $APP_CLUSTER_SECRET"
 ```
 
 **What happens internally:**
@@ -420,7 +429,7 @@ curl -X POST "http://localhost:9000/nodes/heartbeat?nodeId=node-1&diskUsed=20971
 Mark a node as dead to test fault-tolerance behaviour:
 
 ```bash
-curl -X POST http://localhost:9000/nodes/node-1/fail
+curl -X POST http://localhost:9000/nodes/node-1/fail -H "Authorization: Bearer $TOKEN"
 ```
 
 ### What happens after a node is killed

@@ -48,12 +48,14 @@ public class FileChunkService {
     private final NodeRegistryService nodeRegistryService;
     private final ConsistentHashRing consistentHashRing;
     private final ChunkPlacementRepository chunkPlacementRepository;
+    private final RestTemplate restTemplate;
 
     public FileChunkService(StorageProperties storageProperties,
                             FileIndexRepository fileIndexRepository,
                             NodeRegistryService nodeRegistryService,
                             ConsistentHashRing consistentHashRing,
-                            ChunkPlacementRepository chunkPlacementRepository) throws IOException {
+                            ChunkPlacementRepository chunkPlacementRepository,
+                            RestTemplate restTemplate) throws IOException {
         this.tempPath = Path.of(storageProperties.getTempDir(), "coordinator-staging").toAbsolutePath().normalize();
         this.uploadPath = Path.of(storageProperties.getUploadDir()).toAbsolutePath().normalize();
         this.maxChunksPerFile = storageProperties.getMaxChunksPerFile();
@@ -62,6 +64,7 @@ public class FileChunkService {
         this.nodeRegistryService = nodeRegistryService;
         this.consistentHashRing = consistentHashRing;
         this.chunkPlacementRepository = chunkPlacementRepository;
+        this.restTemplate = restTemplate;
         
         Files.createDirectories(this.tempPath);
         Files.createDirectories(this.uploadPath);
@@ -152,7 +155,6 @@ public class FileChunkService {
             }
 
             // Step 4: Replicate the chunk to each target node.
-            RestTemplate restTemplate = new RestTemplate();
             int replicaIndex = 0;
 
             // A retried chunk replaces its previous placements.
@@ -280,7 +282,6 @@ public class FileChunkService {
         fileIndex.setFileSize(0L);
         fileIndex = fileIndexRepository.save(fileIndex);
 
-        RestTemplate restTemplate = new RestTemplate();
         int replicationFactor = storageProperties.getReplicationFactor();
         long totalSize = 0;
 
@@ -414,7 +415,6 @@ public class FileChunkService {
         Path rebuiltFile = uploadPath.resolve(fileIndex.getFileName()).normalize();
 
         List<StorageNode> aliveNodes = nodeRegistryService.getAliveNodes();
-        RestTemplate restTemplate = new RestTemplate();
 
         try (OutputStream outputStream = Files.newOutputStream(rebuiltFile)) {
             for (int chunkNumber = 0; chunkNumber < totalChunks; chunkNumber++) {
@@ -487,7 +487,6 @@ public class FileChunkService {
 
         int totalChunks = fileIndex.getTotalChunks();
         List<StorageNode> aliveNodes = nodeRegistryService.getAliveNodes();
-        RestTemplate restTemplate = new RestTemplate();
 
         for (int chunkNumber = 0; chunkNumber < totalChunks; chunkNumber++) {
             List<ChunkPlacement> placements = chunkPlacementRepository.findByFileIdAndChunkNumber(identifier, chunkNumber);

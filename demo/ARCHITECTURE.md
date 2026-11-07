@@ -494,6 +494,11 @@ The database values are driven by environment variables:
 - `DB_USERNAME`
 - `DB_PASSWORD`
 
+The secrets are required environment variables with no default values, and the application will not start without them:
+
+- `APP_JWT_SECRET`
+- `APP_CLUSTER_SECRET`
+
 ### `src/test/resources/application-test.properties`
 
 This file is only for tests.

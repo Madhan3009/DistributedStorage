@@ -14,8 +14,10 @@ spring:
 
 app:
   jwt:
-    secret: afafasfafafasfasfasfafacasdasfasxASFACASDFACASDFASFASFDAFASFASDAADSCSDFADCVSGCFVADXCcadwavfsfarvf
+    secret: ${APP_JWT_SECRET}
     expiration-seconds: 18000
+  cluster:
+    secret: ${APP_CLUSTER_SECRET}
   tempDir: ${APP_TEMP_DIR:temp/}
   uploadDir: ${APP_UPLOAD_DIR:uploads/}
   maxChunksPerFile: ${APP_MAX_CHUNKS:10}

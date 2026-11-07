@@ -8,8 +8,8 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 
 /**
- * Cluster membership API on the coordinator: storage node registration and heartbeats, node
- * listing, and failure simulation for testing re-replication.
+ * Cluster membership API on the coordinator. Storage nodes register and send heartbeats using the
+ * cluster token; node listing and failure simulation require a user JWT.
  */
 @RestController
 @RequestMapping("/nodes")

@@ -23,8 +23,11 @@ public class NodeHeartbeatSender {
     // True when this instance runs in the NODE role.
     private final boolean isNodeRole;
 
-    public NodeHeartbeatSender(StorageProperties storageProperties) {
+    private final RestTemplate restTemplate;
+
+    public NodeHeartbeatSender(StorageProperties storageProperties, RestTemplate restTemplate) {
         this.storageProperties = storageProperties;
+        this.restTemplate = restTemplate;
         this.isNodeRole = "NODE".equalsIgnoreCase(storageProperties.getRole());
         
         if (this.isNodeRole) {
@@ -47,8 +50,6 @@ public class NodeHeartbeatSender {
         String coordinatorUrl = storageProperties.getCoordinatorUrl();
         String registerUrl = coordinatorUrl + "/nodes/register";
         String heartbeatUrl = coordinatorUrl + "/nodes/heartbeat";
-
-        RestTemplate restTemplate = new RestTemplate();
 
         // Register with the coordinator.
         try {

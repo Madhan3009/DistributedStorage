@@ -1,10 +1,13 @@
 package com.dSystems.demo.Config;
 
+import com.dSystems.demo.Security.ClusterAuthenticationFilter;
 import com.dSystems.demo.Security.CustomUserDetailsService;
 import com.dSystems.demo.Security.JWTAuthenticationFilter;
 import com.dSystems.demo.Security.JWTAthenticationEntryPoint;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.AuthenticationProvider;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -21,7 +24,7 @@ import org.springframework.web.client.RestTemplate;
 
 /**
  * Spring Security configuration: route authorization, stateless JWT authentication, and
- * password encoding. Also exposes the shared {@link RestTemplate} bean.
+ * password encoding. Also exposes the {@link RestTemplate} used for cluster traffic.
  */
 @Configuration
 @EnableMethodSecurity
@@ -29,13 +32,16 @@ public class AppConfig {
 
     private final CustomUserDetailsService userDetailsService;
     private final JWTAuthenticationFilter jwtAuthenticationFilter;
+    private final ClusterAuthenticationFilter clusterAuthenticationFilter;
     private final JWTAthenticationEntryPoint authenticationEntryPoint;
 
     public AppConfig(CustomUserDetailsService userDetailsService,
                      JWTAuthenticationFilter jwtAuthenticationFilter,
+                     ClusterAuthenticationFilter clusterAuthenticationFilter,
                      JWTAthenticationEntryPoint authenticationEntryPoint) {
         this.userDetailsService = userDetailsService;
         this.jwtAuthenticationFilter = jwtAuthenticationFilter;
+        this.clusterAuthenticationFilter = clusterAuthenticationFilter;
         this.authenticationEntryPoint = authenticationEntryPoint;
     }
 
@@ -60,22 +66,25 @@ public class AppConfig {
                 .authorizeHttpRequests(auth -> auth
                         // Login and registration.
                         .requestMatchers("/auth/**").permitAll()
-                        // Node registration, heartbeats, and cluster administration.
-                        .requestMatchers("/nodes/**").permitAll()
-                        // Chunk storage endpoints used for coordinator-to-node traffic.
-                        .requestMatchers("/internal/**").permitAll()
+                        // Node registration and heartbeats require the cluster token.
+                        .requestMatchers(HttpMethod.POST, "/nodes/register", "/nodes/heartbeat").hasRole("CLUSTER")
+                        // Chunk storage endpoints require the cluster token.
+                        .requestMatchers("/internal/**").hasRole("CLUSTER")
                         // Dashboard static assets and the root redirect.
                         .requestMatchers("/dashboard/**", "/dashboard", "/", "/error").permitAll()
                         // Actuator health and metrics.
                         .requestMatchers("/actuator/**").permitAll()
-                        // All remaining routes require authentication.
+                        // All remaining routes, including node listing and failure simulation, require a user JWT.
                         .anyRequest().authenticated())
                 
                 // Username/password verification used by the login flow.
                 .authenticationProvider(authenticationProvider())
                 
                 // Authenticate bearer tokens before the username/password filter runs.
-                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)
+
+                // Authenticate cluster tokens on coordinator and storage node endpoints.
+                .addFilterBefore(clusterAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
 
         return http.build();
     }
@@ -106,9 +115,18 @@ public class AppConfig {
         return configuration.getAuthenticationManager();
     }
 
+    /**
+     * Client for coordinator and storage node traffic. Sends the cluster token on every request,
+     * so it must only be used to call cluster members.
+     */
     @Bean
-    public RestTemplate restTemplate() {
-        return new RestTemplate();
+    public RestTemplate restTemplate(@Value("${app.cluster.secret}") String clusterSecret) {
+        RestTemplate restTemplate = new RestTemplate();
+        restTemplate.getInterceptors().add((request, body, execution) -> {
+            request.getHeaders().set(ClusterAuthenticationFilter.HEADER_NAME, clusterSecret);
+            return execution.execute(request, body);
+        });
+        return restTemplate;
     }
 }
 

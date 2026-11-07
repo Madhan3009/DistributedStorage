@@ -18,8 +18,8 @@ import java.util.Comparator;
 
 /**
  * Chunk storage API exposed by each storage node for coordinator-to-node traffic: store, fetch,
- * and delete chunks on local disk, plus a health check. Clients should use the coordinator's
- * {@code /files} API instead.
+ * and delete chunks on local disk, plus a health check. All endpoints require the cluster token;
+ * clients use the coordinator's {@code /files} API instead.
  */
 @RestController
 @RequestMapping("/internal")
