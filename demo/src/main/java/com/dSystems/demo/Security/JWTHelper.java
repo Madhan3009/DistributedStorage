@@ -16,35 +16,24 @@ import java.util.Map;
 import java.util.function.Function;
 
 /**
- * THE JWT TICKET MACHINE (TICKET GENERATOR & VALIDATOR).
- * 
- * Think of this class as the "admission ticket printing office". 
- * 1. When a user logs in, this machine prints a "ticket" (a JWT token) containing their username.
- * 2. It stamps/signs the ticket with a secret cryptographic seal (using a private secret key).
- * 3. When the user shows this ticket later, this class verifies that the signature is genuine
- *    and that the ticket hasn't expired.
- * 
- * JWT (JSON Web Token) is a standard format for these tickets. It looks like a long string of letters
- * separated by dots (e.g., `header.payload.signature`).
+ * Issues and validates HMAC-signed JSON Web Tokens whose subject is the username.
  */
 @Component
 public class JWTHelper {
     
-    // The secret password/key phrase used to sign the tokens. Loaded from configuration settings.
+    // Signing secret, loaded from configuration.
     @Value("${app.jwt.secret}")
     private String secret;
 
-    // How many seconds a token remains valid before it expires and the user has to log in again.
+    // Token lifetime in seconds.
     @Value("${app.jwt.expiration-seconds}")
     private long jwtTokenValidity;
 
-    // The actual cryptographic key generated from our secret password text.
+    // HMAC key derived from the configured secret.
     private SecretKey secretKey;
 
     /**
-     * Initialization step.
-     * - @PostConstruct: Tells Spring to run this automatically as soon as the helper is created.
-     * It converts our secret configuration text into a secure cryptographic key structure.
+     * Derives the signing key from the configured secret.
      */
     @PostConstruct
     void init() {
@@ -52,21 +41,21 @@ public class JWTHelper {
     }
 
     /**
-     * Reads a ticket and extracts the username (subject) printed on it.
+     * @return the username (subject) stored in the token
      */
     public String getUsernameFromToken(String token) {
         return getClaimFromToken(token, Claims::getSubject);
     }
 
     /**
-     * Reads a ticket and extracts the expiration timestamp.
+     * @return the token's expiration time
      */
     public Date getExpirationDateFromToken(String token) {
         return getClaimFromToken(token, Claims::getExpiration);
     }
 
     /**
-     * A helper method to extract specific pieces of information (claims) from a ticket.
+     * Applies a resolver function to the token's verified claims.
      */
     public <T> T getClaimFromToken(String token, Function<Claims, T> claimsResolver) {
         final Claims claims = getAllClaimsFromToken(token);
@@ -74,17 +63,16 @@ public class JWTHelper {
     }
 
     /**
-     * Unwraps the token and reads all data written inside.
-     * It uses our cryptographic key to verify the token's signature. If someone tried to forge/modify
-     * the token, this method will detect it and throw an error.
+     * Verifies the token's signature and returns its claims.
+     *
+     * @throws io.jsonwebtoken.JwtException if the token is invalid, tampered with, or expired
      */
     private Claims getAllClaimsFromToken(String token) {
         return Jwts.parser().verifyWith(secretKey).build().parseSignedClaims(token).getPayload();
     }
 
     /**
-     * Checks if a ticket's expiration time has already passed.
-     * @return true if expired, false if still valid.
+     * @return true if the token's expiration time has passed
      */
     private Boolean isTokenExpired(String token) {
         final Date expiration = getExpirationDateFromToken(token);
@@ -92,7 +80,7 @@ public class JWTHelper {
     }
 
     /**
-     * Generates a new admission ticket for a user who just successfully logged in.
+     * Issues a token for an authenticated user.
      */
     public String generateToken(UserDetails userDetails) {
         Map<String, Object> claims = new HashMap<>();
@@ -100,12 +88,7 @@ public class JWTHelper {
     }
 
     /**
-     * Assembles and signs the token.
-     * 1. Sets the username (subject).
-     * 2. Sets the creation date (issuedAt).
-     * 3. Sets the expiration date (creation time + validity duration).
-     * 4. Signs the ticket using our private cryptographic key to make it tamper-proof.
-     * 5. Compacts it into a single URL-safe string.
+     * Builds a signed, compact JWT with the given subject and the configured lifetime.
      */
     private String doGenerateToken(Map<String, Object> claims, String subject) {
         return Jwts.builder()
@@ -118,8 +101,7 @@ public class JWTHelper {
     }
 
     /**
-     * Verifies if a presented ticket is valid.
-     * @return true if the ticket username matches the database user, and the ticket is NOT expired.
+     * @return true if the token belongs to the given user and has not expired
      */
     public Boolean validateToken(String token, UserDetails userDetails) {
         final String username = getUsernameFromToken(token);

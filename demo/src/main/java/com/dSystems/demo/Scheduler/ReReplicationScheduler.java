@@ -27,16 +27,10 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * THE CLUSTER SELF-HEALING SYSTEM (THE DOCTOR).
- * 
- * Think of this class as a background "medical doctor" that periodically checks if our file copies
- * are healthy. 
- * If a server crashes (marked "DEAD"), any file chunks stored on it are lost. This class wakes up
- * every 20 seconds, identifies those lost chunks, finds a surviving copy on another healthy server,
- * copies it to a new healthy server, and updates the database records.
- * 
- * This ensures that even if servers crash, we always maintain the required number of backups
- * (replication factor) for every file.
+ * Restores the replication factor after node failures. On a fixed interval, finds chunks with
+ * placements on DEAD nodes, copies each under-replicated chunk from a surviving replica to other
+ * ALIVE nodes, and removes the stale placement records. A file whose chunk has no surviving
+ * replica is marked CORRUPT. Runs on the coordinator only.
  */
 @Component
 @ConditionalOnProperty(name = "app.role", havingValue = "COORDINATOR", matchIfMissing = true)
@@ -52,9 +46,6 @@ public class ReReplicationScheduler {
 
     private final AtomicBoolean isRunning = new AtomicBoolean(false);
 
-    /**
-     * Constructor - Configures dependencies.
-     */
     public ReReplicationScheduler(ChunkPlacementRepository chunkPlacementRepository,
                                   NodeRegistryService nodeRegistryService,
                                   StorageProperties storageProperties,
@@ -70,8 +61,7 @@ public class ReReplicationScheduler {
     }
 
     /**
-     * Periodic healing task.
-     * Wakes up every 20 seconds (or configurable interval) to repair missing backups.
+     * Runs one re-replication pass. The interval is set by {@code app.healing-interval-ms}.
      */
     @Scheduled(fixedRateString = "${app.healing-interval-ms:20000}")
     @Transactional
@@ -83,19 +73,19 @@ public class ReReplicationScheduler {
         }
 
         try {
-            // Step 1: Get all servers and split them into ALIVE and DEAD lists
+            // Step 1: Partition nodes by health.
             List<StorageNode> allNodes = nodeRegistryService.getAllNodes();
             List<StorageNode> aliveNodes = allNodes.stream().filter(n -> "ALIVE".equals(n.getStatus())).toList();
             List<StorageNode> deadNodes = allNodes.stream().filter(n -> "DEAD".equals(n.getStatus())).toList();
 
-            // If no servers are dead, or there are no live servers left to copy data to, we can't heal anything.
+            // Nothing to do without a DEAD node; no possible targets without an ALIVE node.
             if (deadNodes.isEmpty() || aliveNodes.isEmpty()) {
                 return;
             }
 
             List<String> deadNodeIds = deadNodes.stream().map(StorageNode::getNodeId).toList();
             
-            // Find all unique file IDs that have placements on the dead nodes
+            // Step 2: Find files with placements on DEAD nodes.
             List<String> fileIdsToHeal = chunkPlacementRepository.findFileIdsWithPlacementsOnNodes(deadNodeIds);
 
             for (String fileId : fileIdsToHeal) {
@@ -115,7 +105,7 @@ public class ReReplicationScheduler {
                             .filter(cp -> cp.getChunkNumber() == currentChunkNum)
                             .toList();
 
-                    // Filter out the copies that are on healthy servers
+                    // Separate replicas on ALIVE nodes from those on DEAD nodes.
                     List<ChunkPlacement> alivePlacements = chunkPlacements.stream()
                             .filter(cp -> aliveNodes.stream().anyMatch(an -> an.getNodeId().equals(cp.getNodeId())))
                             .toList();
@@ -125,11 +115,11 @@ public class ReReplicationScheduler {
                             .toList();
 
                     if (deadPlacementsForChunk.isEmpty()) {
-                        // This chunk does not have any placement on the dead nodes, skip it
+                        // No replica of this chunk was on a DEAD node.
                         continue;
                     }
 
-                    // Step 3: Check if we have total data loss for this chunk
+                    // Step 3: Handle total loss of this chunk.
                     if (alivePlacements.isEmpty()) {
                         LOGGER.error("CRITICAL: All replicas of chunk {} for file {} ({}) are lost! Marking file as CORRUPT.",
                                 chunkNumber, fileIndex.getFileName(), fileId);
@@ -137,18 +127,18 @@ public class ReReplicationScheduler {
                         fileIndex.setStatus("CORRUPT");
                         fileIndexRepository.save(fileIndex);
                         
-                        // Clean up dead placements in DB since they are no longer accessible
+                        // The lost placements can never be served, so remove their records.
                         chunkPlacementRepository.deleteAll(deadPlacementsForChunk);
                         meterRegistry.counter("replication.failed.chunks").increment();
                         continue;
                     }
 
-                    // Step 4: Check if the number of healthy copies has dropped below our safety target
+                    // Step 4: Re-replicate if below the target replication factor.
                     if (alivePlacements.size() < targetReplication) {
                         LOGGER.info("Chunk {} of file {} is under-replicated ({} alive, target {}). Healing...",
                                 chunkNumber, fileId, alivePlacements.size(), targetReplication);
 
-                        // Find healthy servers that don't already store a copy of this chunk
+                        // Candidates are ALIVE nodes that do not already hold this chunk.
                         List<StorageNode> candidates = aliveNodes.stream()
                                 .filter(an -> chunkPlacements.stream().noneMatch(cp -> cp.getNodeId().equals(an.getNodeId())))
                                 .toList();
@@ -156,7 +146,7 @@ public class ReReplicationScheduler {
                         if (candidates.isEmpty()) {
                             LOGGER.warn("No suitable alive nodes found to host replica for chunk {} of file {}",
                                     chunkNumber, fileId);
-                            // Clean up dead placement records anyway as we can't heal to new nodes right now
+                            // Remove the stale records even though no new replica can be placed now.
                             chunkPlacementRepository.deleteAll(deadPlacementsForChunk);
                             continue;
                         }
@@ -166,7 +156,7 @@ public class ReReplicationScheduler {
 
                         for (int i = 0; i < Math.min(neededReplicas, candidates.size()); i++) {
                             StorageNode newTarget = candidates.get(i);
-                            // Pick the first active copy as the source
+                            // Use the first surviving replica as the copy source.
                             ChunkPlacement sourcePlacement = alivePlacements.get(0);
                             
                             StorageNode sourceNode = aliveNodes.stream()
@@ -177,7 +167,7 @@ public class ReReplicationScheduler {
                                 continue;
                             }
 
-                            // Step 5: Fetch the chunk bytes from the healthy source server
+                            // Step 5: Fetch the chunk from the source node.
                             String fetchUrl = String.format("http://%s:%d/internal/fetch?fileId=%s&chunkNumber=%d",
                                     sourceNode.getHost(), sourceNode.getPort(), fileId, chunkNumber);
 
@@ -187,11 +177,11 @@ public class ReReplicationScheduler {
                                 if (response.getStatusCode() == HttpStatus.OK && response.getBody() != null) {
                                     byte[] chunkBytes = response.getBody();
 
-                                    // Save the downloaded bytes temporarily on the coordinator
+                                    // Stage the chunk on the coordinator for the upload.
                                     tempFile = Files.createTempFile("replicate-heal-", ".part");
                                     Files.write(tempFile, chunkBytes);
 
-                                    // Step 6: Upload the chunk to the new target server
+                                    // Step 6: Store the chunk on the target node.
                                     String storeUrl = String.format("http://%s:%d/internal/store", newTarget.getHost(), newTarget.getPort());
                                     LinkedMultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
                                     body.add("fileId", fileId);
@@ -204,7 +194,7 @@ public class ReReplicationScheduler {
                                     HttpEntity<LinkedMultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
                                     restTemplate.postForEntity(storeUrl, requestEntity, String.class);
 
-                                    // Step 7: Record the new copy's location in our SQL database
+                                    // Step 7: Record the new placement.
                                     ChunkPlacement newPlacement = new ChunkPlacement();
                                     newPlacement.setFileId(fileId);
                                     newPlacement.setChunkNumber(chunkNumber);
@@ -234,10 +224,10 @@ public class ReReplicationScheduler {
                             }
                         }
 
-                        // Step 8: Delete the old dead location records
+                        // Step 8: Remove the stale placement records.
                         chunkPlacementRepository.deleteAll(deadPlacementsForChunk);
                     } else {
-                        // Node is dead, but we already have enough alive placements elsewhere, just clean up DB
+                        // Already at the target replication factor; only stale records need removal.
                         chunkPlacementRepository.deleteAll(deadPlacementsForChunk);
                     }
                 }

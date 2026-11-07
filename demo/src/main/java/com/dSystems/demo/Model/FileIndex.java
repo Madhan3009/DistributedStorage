@@ -4,59 +4,47 @@ import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
 /**
- * THE FILE DIRECTORY / CATALOG INDEX.
- * 
- * When a user uploads a file, we don't store it as one big file on a single computer.
- * Instead, we chop it up into smaller parts (chunks) and scatter them across different servers.
- * This class acts like a "card catalog" in a library, keeping track of the overall file details:
- * its name, its size, how many pieces it was split into, and who owns it.
- * 
- * Annotations:
- * - @Entity: Tells the database this class represents a table.
- * - @Table(name = "file_indices"): The database table is named "file_indices".
+ * JPA entity holding file-level metadata: name, size, chunk count, owner, and status. Chunk
+ * locations are tracked separately in {@link ChunkPlacement}.
  */
 @Entity
 @Table(name = "file_indices")
 public class FileIndex {
 
-    // Unique catalog record identifier.
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // A unique system-generated key (like a barcode) to reference the file.
+    // Unique file identifier used by the API and in chunk placements.
     @Column(nullable = false, unique = true)
     private String fileId;
 
-    // The user-facing name of the file (e.g. "my_presentation.pdf").
+    // Original client-supplied file name.
     @Column(nullable = false)
     private String fileName;
 
-    // How many pieces (chunks) this file has been split into.
+    // Total number of chunks in the file.
     @Column(nullable = false)
     private int totalChunks;
 
-    // The username of the account that uploaded and owns the file.
+    // Username of the file's owner.
     @Column(nullable = false)
     private String ownerUsername;
 
-    // The exact date and time the file was uploaded.
+    // Time the file record was created.
     @Column(nullable = false)
     private LocalDateTime uploadedAt;
 
-    // The status of the file in our storage system:
-    // - "PENDING": Currently being uploaded or split.
-    // - "COMPLETE": All pieces are successfully stored across the servers.
-    // - "DEGRADED": Some server copies were lost, but we still have enough copies to recover the file.
+    // Lifecycle status:
+    // - PENDING: upload in progress.
+    // - COMPLETE: at least one replica of every chunk has been stored.
+    // - CORRUPT: all replicas of at least one chunk have been lost.
     @Column(nullable = false)
-    private String status; // e.g., PENDING, COMPLETE, DEGRADED
+    private String status;
 
-    // The total file size in bytes (e.g., 1,048,576 bytes = 1 Megabyte).
+    // Total file size in bytes; 0 until the upload completes.
     @Column(nullable = false)
     private long fileSize;
-
-    // --- GETTERS AND SETTERS ---
-    // Methods to access and update file index information safely.
 
     public Long getId() {
         return id;

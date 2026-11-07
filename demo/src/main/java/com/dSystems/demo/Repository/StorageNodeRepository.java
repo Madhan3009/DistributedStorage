@@ -6,28 +6,22 @@ import java.util.Optional;
 import java.util.List;
 
 /**
- * THE STORAGE NODE REGISTRY DATABASE CLERK / REPOSITORY.
- * 
- * This database assistant keeps track of all active and inactive storage servers (worker nodes) in our cluster.
+ * Persistence operations for {@link StorageNode}.
  */
 public interface StorageNodeRepository extends JpaRepository<StorageNode, Long> {
     
     /**
-     * Finds a storage server's details using its unique identifier (like "node-1").
-     * 
-     * @return An Optional box containing the server's record if found.
+     * Finds a node by its unique identifier.
      */
     Optional<StorageNode> findByNodeId(String nodeId);
 
     /**
-     * Finds a storage server using its network address (host/IP) and port number.
-     * Useful for checking if a newly connected server is already registered.
+     * Finds a node by its network address.
      */
     Optional<StorageNode> findByHostAndPort(String host, int port);
 
     /**
-     * Gets a list of all servers matching a specific status (e.g., "ALIVE" or "DEAD").
-     * Used by the coordinator to list active storage nodes when deciding where to place new file parts.
+     * Finds all nodes with the given status, e.g. ALIVE.
      */
     List<StorageNode> findByStatus(String status);
 }

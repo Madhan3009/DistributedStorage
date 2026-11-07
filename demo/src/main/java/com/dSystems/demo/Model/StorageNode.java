@@ -4,55 +4,45 @@ import jakarta.persistence.*;
 import java.time.LocalDateTime;
 
 /**
- * THE STORAGE NODE (WORKER SERVER) DATA MODEL.
- * 
- * Think of a "Storage Node" as an individual computer/server in our network that acts as a digital drawer.
- * This class is the registration card the Coordinator uses to keep track of each server's network details,
- * health status (alive or dead), and how much empty space it has.
- * 
- * Annotations:
- * - @Entity: Tells the database that this represents a table.
- * - @Table(name = "storage_nodes"): Specifies the database table name where worker server details are saved.
+ * JPA entity for a storage node in the coordinator's registry: network address, health status,
+ * and most recently reported disk usage.
  */
 @Entity
 @Table(name = "storage_nodes")
 public class StorageNode {
 
-    // Unique internal registration number in our database.
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    // The unique name/ID given to this storage node (e.g. "node-1").
+    // Unique node identifier, e.g. node-1.
     @Column(nullable = false, unique = true)
     private String nodeId;
 
-    // The IP address or web address of this storage node (e.g. "192.168.1.10").
+    // Hostname or IP address of the node.
     @Column(nullable = false)
     private String host;
 
-    // The port number (network door) this node listens to (e.g. 9001).
+    // Port on which the node accepts requests.
     @Column(nullable = false)
     private int port;
 
-    // The health status of the node:
-    // - "ALIVE": The server is up, running, and accepting files.
-    // - "DEAD": The server crashed or lost connection.
+    // Health status:
+    // - ALIVE: heartbeats are current; eligible for reads and new placements.
+    // - SUSPECTED: a heartbeat has been missed; excluded from reads and new placements.
+    // - DEAD: failed; replicas held by this node are re-created elsewhere.
     @Column(nullable = false)
-    private String status; // ALIVE, DEAD
+    private String status;
 
-    // The exact date and time this server last sent a "heartbeat" message to prove it is still running.
+    // Time of the most recent registration or heartbeat.
     @Column(nullable = false)
     private LocalDateTime lastHeartbeatAt;
 
-    // How much disk space (in bytes) is currently occupied on this server.
+    // Disk space in use, in bytes, as of the last heartbeat.
     private long diskUsedBytes;
     
-    // How much free disk space (in bytes) is still available on this server.
+    // Free disk space, in bytes, as of the last heartbeat.
     private long diskFreeBytes;
-
-    // --- GETTERS AND SETTERS ---
-    // Controls for reading and updating the server details.
 
     public Long getId() {
         return id;
@@ -118,7 +108,7 @@ public class StorageNode {
         this.diskFreeBytes = diskFreeBytes;
     }
 
-    // How many consecutive heartbeat windows this node has missed.
+    // Number of missed heartbeat checks since the last successful heartbeat.
     @Column(nullable = false)
     private int missedHeartbeats = 0;
 

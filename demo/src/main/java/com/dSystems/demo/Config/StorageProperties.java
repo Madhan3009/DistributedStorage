@@ -3,51 +3,37 @@ package com.dSystems.demo.Config;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 /**
- * CONFIGURATION SETTINGS / PROPERTIES.
- * 
- * Think of this class as a "settings form" or a "control panel" with knobs and switches.
- * It holds the configuration variables for our distributed storage system. 
- * Instead of writing these values directly into the code (which makes them hard to change),
- * Spring loads these values from an external file (like `application.properties`) and maps them here.
- * 
- * Annotations:
- * - @ConfigurationProperties(prefix = "app"): Tells the app to look for settings that start with "app."
- *   in the configuration file (e.g., `app.temp-dir=temp/`) and automatically assign them to the variables below.
+ * Externalized storage and cluster settings, bound from configuration properties prefixed with
+ * {@code app}.
  */
 @ConfigurationProperties(prefix = "app")
 public class StorageProperties {
 
-    // --- 1. DIRECTORIES ---
-    // The temporary folder path used for holding files while they are processed.
+    // Directories
+    // Working directory for staged chunks; also the chunk store on storage nodes.
     private String tempDir = "temp/";
-    // The main directory where uploaded files are stored.
+    // Destination directory for files rebuilt on the coordinator.
     private String uploadDir = "uploads/";
 
-    // --- 2. STORAGE SYSTEM SETTINGS ---
-    // The maximum number of segments/chunks we split a single file into.
+    // Storage
+    // Maximum number of chunks allowed per file.
     private int maxChunksPerFile = 3;
-    // The number of copies (replicas) of each chunk we save across the system to prevent data loss.
+    // Target number of replicas maintained for each chunk.
     private int replicationFactor = 3;
-    // The periodic healing check interval in milliseconds
+    // Interval between re-replication runs, in milliseconds.
     private long healingIntervalMs = 20000;
 
-    // --- 3. CLUSTER & ROLE SETTINGS ---
-    // The role of this specific running program in the system.
-    // - "COORDINATOR": The main boss server that organizes who stores what.
-    // - "NODE": A worker storage server that actually stores the file chunks.
+    // Cluster
+    // Role of this instance: COORDINATOR manages metadata and placement; NODE stores chunks.
     private String role = "COORDINATOR"; 
-    // The web address of the coordinator server, so worker nodes know where to report.
+    // Base URL of the coordinator, used by storage nodes to register and send heartbeats.
     private String coordinatorUrl = "http://localhost:9000";
-    // A unique identifier name for this storage node.
+    // Unique identifier of this storage node.
     private String nodeId = "node-1";
-    // The host name or IP address of this node.
+    // Hostname or IP address the coordinator uses to reach this node.
     private String host = "localhost";
-    // The port number (door number) this node uses to listen for network traffic.
+    // Port on which this node accepts requests.
     private int port = 9001;
-
-    // --- GETTERS AND SETTERS ---
-    // In Java, we make properties "private" (hidden) for safety, and use "getters" (to read)
-    // and "setters" (to change) as controlled windows to access these values.
 
     public String getTempDir() {
         return tempDir;

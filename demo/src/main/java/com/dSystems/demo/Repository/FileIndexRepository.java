@@ -6,30 +6,22 @@ import java.util.Optional;
 import java.util.List;
 
 /**
- * THE FILE CATALOG DATABASE CLERK / REPOSITORY.
- * 
- * This database assistant is in charge of writing, reading, and updating the catalog records (FileIndex) 
- * for files uploaded to our cluster.
+ * Persistence operations for {@link FileIndex}.
  */
 public interface FileIndexRepository extends JpaRepository<FileIndex, Long> {
     
     /**
-     * Looks up a file record by its unique system ID (barcode).
-     * 
-     * @return An Optional box containing the file's details if found.
+     * Finds a file record by its unique identifier.
      */
     Optional<FileIndex> findByFileId(String fileId);
 
     /**
-     * Retrieves a list of all files that belong to a specific user.
-     * 
-     * Spring automatically generates: "SELECT * FROM file_indices WHERE owner_username = ?"
-     * @return A list of files owned by the user.
+     * Finds all files owned by a user.
      */
     List<FileIndex> findByOwnerUsername(String ownerUsername);
 
     /**
-     * Checks if a file ID is already registered in our catalog.
+     * @return true if a file record exists for the identifier
      */
     boolean existsByFileId(String fileId);
 }

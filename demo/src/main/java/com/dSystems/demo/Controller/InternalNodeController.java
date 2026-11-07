@@ -17,44 +17,30 @@ import java.nio.file.StandardCopyOption;
 import java.util.Comparator;
 
 /**
- * THE STORAGE NODE'S INTERNAL GATEWAY.
- * 
- * Think of this class as the backend loading dock running on each individual storage server (worker node).
- * Only the central coordinator server talks to these endpoints; regular users never call them directly.
- * 
- * It handles the low-level physical file operations on the server's local hard drive:
- * 1. Store: Receive a binary chunk from the coordinator and write it to a local folder.
- * 2. Fetch: Locate a stored chunk and stream its bytes back to the coordinator.
- * 3. Delete: Wipe out all chunk files associated with a deleted file ID.
- * 4. Health: A simple "Are you awake?" ping endpoint.
- * 
- * Annotations:
- * - @RestController: Marks this as a REST endpoint controller.
- * - @RequestMapping("/internal"): Prepends "/internal" to all paths in this file.
+ * Chunk storage API exposed by each storage node for coordinator-to-node traffic: store, fetch,
+ * and delete chunks on local disk, plus a health check. Clients should use the coordinator's
+ * {@code /files} API instead.
  */
 @RestController
 @RequestMapping("/internal")
 public class InternalNodeController {
     private static final Logger LOGGER = LoggerFactory.getLogger(InternalNodeController.class);
 
-    // The root directory on this storage node's hard drive where file chunks are kept
+    // Root directory for chunk files on this node.
     private final Path storagePath;
 
-    /**
-     * Constructor - Configures and creates the storage directory path on startup.
-     */
     public InternalNodeController(StorageProperties storageProperties) throws IOException {
         this.storagePath = Path.of(storageProperties.getTempDir()).toAbsolutePath().normalize();
         Files.createDirectories(this.storagePath);
     }
 
     /**
-     * SERVICE: Store a chunk on disk.
-     * Web URL: POST http://localhost:8081/internal/store
-     * 
-     * @param fileId The unique ID of the file.
-     * @param chunkNumber The index of this chunk.
-     * @param chunkFile The raw binary file chunk.
+     * Writes a chunk to local disk, replacing any existing copy.
+     * {@code POST /internal/store}
+     *
+     * @param fileId unique file identifier
+     * @param chunkNumber zero-based chunk index
+     * @param chunkFile chunk contents
      */
     @PostMapping("/store")
     public ResponseEntity<String> storeChunk(
@@ -63,20 +49,16 @@ public class InternalNodeController {
             @RequestParam("file") MultipartFile chunkFile
     ) {
         try {
-            // Resolve the folder path for this file: /storage_dir/{fileId}
             Path fileDir = storagePath.resolve(fileId).normalize();
             
-            // SECURITY CHECK (Path Traversal Protection):
-            // Prevents malicious paths like "../../etc" that try to escape the storage root.
+            // Reject identifiers that resolve outside the storage root (path traversal).
             if (!fileDir.startsWith(storagePath)) {
                 return ResponseEntity.badRequest().body("Invalid file path");
             }
             Files.createDirectories(fileDir);
 
-            // Path to save the chunk file: /storage_dir/{fileId}/chunk-{chunkNumber}.part
             Path targetFile = fileDir.resolve("chunk-" + chunkNumber + ".part");
             
-            // Copy the incoming binary stream directly to the target file path, replacing any old copy
             Files.copy(chunkFile.getInputStream(), targetFile, StandardCopyOption.REPLACE_EXISTING);
             LOGGER.info("Successfully stored chunk {} for fileId {}", chunkNumber, fileId);
             return ResponseEntity.ok("Stored");
@@ -87,26 +69,23 @@ public class InternalNodeController {
     }
 
     /**
-     * SERVICE: Fetch a chunk from disk to send back to the coordinator.
-     * Web URL: GET http://localhost:8081/internal/fetch
+     * Returns a stored chunk as a binary attachment.
+     * {@code GET /internal/fetch}
      */
     @GetMapping("/fetch")
     public ResponseEntity<Resource> fetchChunk(
             @RequestParam("fileId") String fileId,
             @RequestParam("chunkNumber") int chunkNumber
     ) {
-        // Resolve the target chunk path on disk
         Path targetFile = storagePath.resolve(fileId).resolve("chunk-" + chunkNumber + ".part").normalize();
         
-        // Ensure path is safe and the file actually exists
+        // Treat paths outside the storage root the same as missing chunks.
         if (!targetFile.startsWith(storagePath) || !Files.exists(targetFile)) {
             return ResponseEntity.status(HttpStatus.NOT_FOUND).build();
         }
 
-        // Wrap the physical file in a Spring Resource object
         Resource resource = new FileSystemResource(targetFile.toFile());
         
-        // Return the file with headers indicating it is a binary stream attachment
         return ResponseEntity.ok()
                  .contentType(MediaType.APPLICATION_OCTET_STREAM)
                  .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"chunk-" + chunkNumber + ".part\"")
@@ -114,22 +93,21 @@ public class InternalNodeController {
     }
 
     /**
-     * SERVICE: Delete all chunks of a file.
-     * Web URL: DELETE http://localhost:8081/internal/delete
+     * Deletes all chunks of a file. Succeeds if the file's directory does not exist.
+     * {@code DELETE /internal/delete}
      */
     @DeleteMapping("/delete")
     public ResponseEntity<String> deleteChunks(@RequestParam("fileId") String fileId) {
         try {
             Path fileDir = storagePath.resolve(fileId).normalize();
             
-            // Safety check & bypass if already deleted
+            // Nothing to delete for out-of-root paths or directories that no longer exist.
             if (!fileDir.startsWith(storagePath) || !Files.exists(fileDir)) {
                 return ResponseEntity.ok("Deleted (directory did not exist)");
             }
             
-            // Recursively walk through and delete all chunk files, then delete the empty folder
             try (var paths = Files.walk(fileDir)) {
-                paths.sorted(Comparator.reverseOrder()) // Delete files inside first, then parent folder
+                paths.sorted(Comparator.reverseOrder()) // Delete children before their parent directory.
                      .map(Path::toFile)
                      .forEach(File::delete);
             }
@@ -142,8 +120,8 @@ public class InternalNodeController {
     }
 
     /**
-     * SERVICE: Quick check endpoint to confirm the server is running.
-     * Web URL: GET http://localhost:8081/internal/health
+     * Liveness check.
+     * {@code GET /internal/health}
      */
     @GetMapping("/health")
     public ResponseEntity<String> health() {
